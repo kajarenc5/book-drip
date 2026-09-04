@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}{{ chapter.title }} · {{ book.title }}{% endblock %}
+{% block main %}
+  <article class="chapter">
+    <p class="kicker">
+      <a href="/book/{{ book.slug }}">{{ book.title }}</a>
+      · Day {{ chapter.position + 1 }} of {{ state.total }}
+      {% if chapter.part %} · {{ chapter.part }}{% endif %}
+    </p>
+    <h1>{{ chapter.title }}</h1>
+    <div class="prose">
+      {% for para in chapter.body | paragraphs %}
+        <p>{{ para }}</p>
+      {% endfor %}
+    </div>
+    <nav class="pager">
+      {% if prev %}
+        <a href="/read/{{ book.slug }}/{{ prev.position }}">← {{ prev.title }}</a>
+      {% else %}
+        <span></span>
+      {% endif %}
+      {% if nxt %}
+        <a href="/read/{{ book.slug }}/{{ nxt.position }}">{{ nxt.title }} →</a>
+      {% else %}
+        <span>Tomorrow is locked</span>
+      {% endif %}
+    </nav>
+    <form class="note" method="post" action="/read/{{ book.slug }}/{{ chapter.position }}/note">
+      <label for="note">A line to keep</label>
+      <textarea id="note" name="body" rows="3" placeholder="What does this ask of today?"></textarea>
+      <button class="btn small" type="submit">Keep</button>
+    </form>
+    {% if notes %}
+      <ul class="notes">
+        {% for n in notes %}
+          <li>{{ n.body }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </article>
+{% endblock %}

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}One Chapter{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=Source+Sans+3:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+</head>
+<body>
+  <div class="frame">
+    <header class="top">
+      <a class="mark" href="/">
+        <img src="/static/mark.svg" alt="">
+        <span>One Chapter</span>
+      </a>
+      <nav>
+        <a href="/" {% if request.url.path == '/' %}aria-current="page"{% endif %}>Today</a>
+        <a href="/library" {% if request.url.path.startswith('/library') or request.url.path.startswith('/book') %}aria-current="page"{% endif %}>Library</a>
+        <a href="/settings" {% if request.url.path.startswith('/settings') %}aria-current="page"{% endif %}>Settings</a>
+      </nav>
+    </header>
+    <main>
+      {% block main %}{% endblock %}
+    </main>
+    <footer class="colophon">
+      One dense chapter. Then a day to think.
+    </footer>
+  </div>
+</body>
+</html>

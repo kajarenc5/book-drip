@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Settings · One Chapter{% endblock %}
+{% block main %}
+  <section class="hero narrow">
+    <p class="kicker">Settings</p>
+    <h1>Telegram delivery</h1>
+    <p class="lede">Create a bot with <a href="https://t.me/BotFather">@BotFather</a>, paste the token, then restart the app. Open the bot and send <code>/start</code>. You can also send the MOBI file directly in the chat.</p>
+    <form class="settings" method="post" action="/settings">
+      <label>
+        Timezone
+        <input type="text" name="timezone" value="{{ reader.timezone }}" required>
+      </label>
+      <label>
+        Daily time
+        <input type="time" name="delivery_hhmm" value="{{ reader.delivery_hhmm }}" required>
+      </label>
+      <label>
+        Bot token {% if has_token %}<span class="hint">saved {{ token_masked }}</span>{% endif %}
+        <input type="password" name="telegram_bot_token" placeholder="{{ 'leave blank to keep' if has_token else '123456:ABC…' }}" autocomplete="off">
+      </label>
+      <button class="btn" type="submit">Save</button>
+    </form>
+    <p class="meta">
+      {% if bot_running %}
+        Bot is polling.
+      {% else %}
+        Bot is not running. Save a token and restart <code>uv run onechapter serve</code>.
+      {% endif %}
+    </p>
+  </section>
+{% endblock %}

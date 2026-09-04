@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Today · One Chapter{% endblock %}
+{% block main %}
+  {% if not chapter %}
+    <section class="hero">
+      <p class="kicker">Slow reading</p>
+      <h1>One chapter a day, from books that should not be rushed.</h1>
+      <p class="lede">Tarasov’s <em>Технология жизни</em> is built from short titled essays. Machiavelli’s <em>Prince</em> is twenty-six arguments. This companion sends you one, then locks tomorrow until tomorrow.</p>
+      <div class="actions">
+        <a class="btn" href="/library">Open the library</a>
+        <label class="btn ghost file">
+          Upload a book
+          <input type="file" name="file" form="hero-upload" onchange="this.form.submit()" accept=".mobi,.azw,.azw3,.epub,.fb2,.txt,.html,.md">
+        </label>
+      </div>
+      <form id="hero-upload" action="/upload" method="post" enctype="multipart/form-data" hidden></form>
+    </section>
+    {% if books %}
+      <ol class="shelf compact">
+        {% for book in books %}
+          <li>
+            <a href="/book/{{ book.slug }}">
+              <span class="days">{{ book.chapter_count }} days</span>
+              <strong>{{ book.title }}</strong>
+              <em>{{ book.author or "Unknown" }}</em>
+            </a>
+          </li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+  {% else %}
+    <article class="chapter" lang="{{ 'ru' if plan.author and 'Тарасов' in (plan.author or '') else 'en' }}">
+      <p class="kicker">
+        Day {{ state.unlocked_through + 1 }} of {{ state.total }}
+        {% if chapter.part %} · {{ chapter.part }}{% endif %}
+        {% if state.status == 'paused' %} · paused{% endif %}
+      </p>
+      <h1>{{ chapter.title }}</h1>
+      <p class="meta">{{ plan.book_title }}{% if plan.author %} · {{ plan.author }}{% endif %}</p>
+      <div class="prose">
+        {% for para in chapter.body | paragraphs %}
+          <p>{{ para }}</p>
+        {% endfor %}
+      </div>
+      {% if nxt %}
+        <p class="tomorrow">Tomorrow: {{ nxt.title }}</p>
+      {% else %}
+        <p class="tomorrow">This is the last chapter.</p>
+      {% endif %}
+      <form class="note" method="post" action="/read/{{ plan.slug }}/{{ chapter.position }}/note">
+        <label for="note">A line to keep</label>
+        <textarea id="note" name="body" rows="3" placeholder="What does this ask of today?"></textarea>
+        <button class="btn small" type="submit">Keep</button>
+      </form>
+      {% if notes %}
+        <ul class="notes">
+          {% for n in notes %}
+            <li>{{ n.body }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </article>
+  {% endif %}
+{% endblock %}

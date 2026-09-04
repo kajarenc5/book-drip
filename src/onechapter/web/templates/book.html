@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ book.title }} · One Chapter{% endblock %}
+{% block main %}
+  <section class="book-head">
+    <p class="kicker">{{ book.chapter_count }} days{% if book.profile == 'tarasov' %} · short essays{% endif %}</p>
+    <h1>{{ book.title }}</h1>
+    <p class="lede">{% if book.author %}{{ book.author }}{% endif %}{% if book.profile == 'tarasov' %} — split at the titled sections, not the four главы.{% endif %}</p>
+    <div class="actions">
+      {% if not state or state.status == 'idle' %}
+        <form method="post" action="/book/{{ book.slug }}/start">
+          <button class="btn" type="submit">Begin today</button>
+        </form>
+      {% elif state.status == 'active' %}
+        <a class="btn" href="/">Today’s chapter</a>
+        <form method="post" action="/book/{{ book.slug }}/pause">
+          <button class="btn ghost" type="submit">Pause</button>
+        </form>
+      {% elif state.status == 'paused' %}
+        <form method="post" action="/book/{{ book.slug }}/resume">
+          <button class="btn" type="submit">Resume</button>
+        </form>
+      {% endif %}
+    </div>
+  </section>
+  <ol class="toc">
+    {% for ch in chapters %}
+      <li class="{% if ch.unlocked %}open{% else %}locked{% endif %}">
+        {% if ch.unlocked %}
+          <a href="/read/{{ book.slug }}/{{ ch.position }}">
+            <span class="n">{{ ch.position + 1 }}</span>
+            <span class="t">{{ ch.title }}</span>
+            {% if ch.part %}<span class="p">{{ ch.part }}</span>{% endif %}
+            <span class="w">{{ ch.word_count }} words</span>
+          </a>
+        {% else %}
+          <div>
+            <span class="n">{{ ch.position + 1 }}</span>
+            <span class="t">{{ ch.title }}</span>
+            {% if ch.part %}<span class="p">{{ ch.part }}</span>{% endif %}
+            <span class="w">locked</span>
+          </div>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ol>
+{% endblock %}
