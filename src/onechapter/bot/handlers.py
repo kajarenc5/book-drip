@@ -247,7 +247,8 @@ async def _send_today(update, conn, state, book, force: bool = False) -> None:
 
 async def _send_chapter(update, conn, state, book, position: int, channel: str, force: bool = False) -> None:
     book_id = book["id"]
-        book_title = book["book_title"] if "book_title" in book.keys() else book["title"]
+    keys = book.keys()
+    book_title = book["book_title"] if "book_title" in keys else book["title"]
     chapter = get_chapter(conn, book_id, position)
     if chapter is None:
         await update.message.reply_text("Chapter missing.")

@@ -1,0 +1,15 @@
+services:
+  onechapter:
+    build: .
+    ports:
+      - "43147:43147"
+    environment:
+      ONECHAPTER_HOST: 0.0.0.0
+      ONECHAPTER_PORT: 43147
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      ONECHAPTER_TIMEZONE: ${ONECHAPTER_TIMEZONE:-Asia/Yerevan}
+    volumes:
+      - onechapter-data:/app/data
+
+volumes:
+  onechapter-data:

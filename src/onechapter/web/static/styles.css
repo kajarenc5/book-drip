@@ -178,6 +178,7 @@ textarea, input[type="text"], input[type="time"], input[type="password"] {
 }
 .drop label { display: grid; gap: 0.5rem; cursor: pointer; color: var(--ink-soft); }
 .flash { color: var(--wax); }
+.flash.ok { color: #3f5c3a; }
 
 .toc { list-style: none; padding: 0; margin: 1.5rem 0 0; display: grid; gap: 0.45rem; }
 .toc .t { font-family: Fraunces, Georgia, serif; }

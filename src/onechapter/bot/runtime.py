@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from onechapter.bot.handlers import (
@@ -54,3 +55,74 @@ def build_scheduler(application: Application) -> AsyncIOScheduler:
 
     scheduler.add_job(tick, "interval", minutes=1, id="daily-chapter", replace_existing=True)
     return scheduler
+
+
+class TelegramRuntime:
+    """Start and stop polling without restarting the web process."""
+
+    def __init__(self) -> None:
+        self.application: Application | None = None
+        self.scheduler: AsyncIOScheduler | None = None
+        self.username: str | None = None
+        self.bot_id: int | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.application is not None
+
+    def snapshot(self) -> dict:
+        return {
+            "running": self.running,
+            "username": self.username,
+            "bot_id": self.bot_id,
+        }
+
+    async def start(self, token: str) -> str:
+        token = (token or "").strip()
+        if not token:
+            raise ValueError("Paste a token from @BotFather first.")
+        await self.stop()
+        application = build_application(token)
+        await application.initialize()
+        try:
+            me = await application.bot.get_me()
+        except (InvalidToken, TelegramError) as exc:
+            await application.shutdown()
+            raise ValueError("Telegram rejected that token. Copy it again from @BotFather.") from exc
+        await application.start()
+        assert application.updater is not None
+        await application.updater.start_polling(drop_pending_updates=True)
+        scheduler = build_scheduler(application)
+        scheduler.start()
+        self.application = application
+        self.scheduler = scheduler
+        self.username = me.username
+        self.bot_id = me.id
+        log.info("Telegram bot @%s polling", me.username)
+        return me.username or str(me.id)
+
+    async def stop(self) -> None:
+        scheduler = self.scheduler
+        application = self.application
+        self.scheduler = None
+        self.application = None
+        self.username = None
+        self.bot_id = None
+        if scheduler is not None:
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception:
+                log.exception("Error stopping delivery scheduler")
+        if application is None:
+            return
+        try:
+            if application.updater is not None and application.updater.running:
+                await application.updater.stop()
+            if application.running:
+                await application.stop()
+            await application.shutdown()
+        except Exception:
+            log.exception("Error stopping Telegram bot")
+
+
+runtime = TelegramRuntime()

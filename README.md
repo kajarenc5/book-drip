@@ -26,6 +26,12 @@ uv run onechapter serve
 
 Open [http://127.0.0.1:43147](http://127.0.0.1:43147).
 
+Or with Docker:
+
+```bash
+docker compose up --build
+```
+
 ### Add *Технология жизни*
 
 The MOBI is not in this repository (it is a copyrighted book you already own). Put yours in:
@@ -42,14 +48,15 @@ The ingest step looks up the publisher table of contents and cuts the file at th
 
 ### Telegram
 
-1. Talk to [@BotFather](https://t.me/BotFather), create a bot, copy the token.
-2. Put it in `.env` as `TELEGRAM_BOT_TOKEN=…` **or** paste it on the Settings page and restart.
-3. Restart `uv run onechapter serve`.
-4. Open the bot, send `/start`, then `/begin` (or send the MOBI first).
+You do not have to restart the app.
 
-Commands: `/today`, `/yesterday`, `/progress`, `/pause`, `/resume`, `/time 08:00`, `/tz Europe/Moscow`, `/books`, `/read tehnologiya-zhizni`.
+1. Talk to [@BotFather](https://t.me/BotFather), `/newbot`, copy the token.
+2. Paste it on the Settings page and save — polling starts immediately — **or** put `TELEGRAM_BOT_TOKEN=…` in `.env` and start the server.
+3. Open the bot, send `/start`, then `/begin` (or send the MOBI first).
 
-Default delivery is 08:00 in `Europe/Moscow`. Change both on Settings or with `/tz` and `/time`.
+Commands: `/today`, `/yesterday`, `/progress`, `/pause`, `/resume`, `/time 08:00`, `/tz Asia/Yerevan`, `/books`, `/read tehnologiya-zhizni`.
+
+Default delivery is 08:00 in `Asia/Yerevan`. Change both on Settings or with `/tz` and `/time`.
 
 ## What is included
 

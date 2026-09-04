@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from onechapter.bot.runtime import runtime as telegram_runtime
 from onechapter.config import public_url
 from onechapter.db import db
 from onechapter.library import (
@@ -36,40 +37,33 @@ log = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
 
-telegram_app = None
-scheduler = None
-
 
 def _nav_ctx(request: Request, **extra):
-    return {"request": request, "public_url": public_url(), **extra}
+    snap = telegram_runtime.snapshot()
+    return {
+        "request": request,
+        "public_url": public_url(),
+        "bot_running": snap["running"],
+        "bot_username": snap["username"],
+        **extra,
+    }
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global telegram_app, scheduler
     bootstrap()
     token = ""
     with db() as conn:
         token = bot_token(conn)
     if token:
-        from onechapter.bot.runtime import build_application, build_scheduler
-
-        telegram_app = build_application(token)
-        await telegram_app.initialize()
-        await telegram_app.start()
-        await telegram_app.updater.start_polling(drop_pending_updates=True)
-        scheduler = build_scheduler(telegram_app)
-        scheduler.start()
-        log.info("Telegram bot polling started")
+        try:
+            await telegram_runtime.start(token)
+        except ValueError as exc:
+            log.warning("Telegram bot did not start: %s", exc)
     else:
-        log.info("No TELEGRAM_BOT_TOKEN — web reader only")
+        log.info("No TELEGRAM_BOT_TOKEN — web reader only; paste one on /settings to start")
     yield
-    if scheduler:
-        scheduler.shutdown(wait=False)
-    if telegram_app:
-        await telegram_app.updater.stop()
-        await telegram_app.stop()
-        await telegram_app.shutdown()
+    await telegram_runtime.stop()
 
 
 app = FastAPI(title="One Chapter", lifespan=lifespan)
@@ -262,7 +256,7 @@ async def upload(file: UploadFile = File(...)):
 
 
 @app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request):
+async def settings_page(request: Request, notice: str | None = None):
     with db() as conn:
         reader = get_or_create_local_reader(conn)
         token = bot_token(conn)
@@ -275,7 +269,7 @@ async def settings_page(request: Request):
                 reader=reader,
                 token_masked=masked,
                 has_token=bool(token),
-                bot_running=telegram_app is not None,
+                notice=notice,
             ),
         )
 
@@ -286,17 +280,25 @@ async def save_settings(
     delivery_hhmm: str = Form(...),
     telegram_bot_token: str = Form(""),
 ):
+    token = telegram_bot_token.strip()
     with db() as conn:
         reader = get_or_create_local_reader(conn)
         update_reader(conn, reader["id"], timezone=timezone.strip(), delivery_hhmm=delivery_hhmm.strip())
-        if telegram_bot_token.strip():
-            set_bot_token(conn, telegram_bot_token.strip())
-    return RedirectResponse("/settings", status_code=303)
+        if token:
+            set_bot_token(conn, token)
+    if token:
+        try:
+            await telegram_runtime.start(token)
+        except ValueError:
+            return RedirectResponse("/settings?notice=bad_token", status_code=303)
+        return RedirectResponse("/settings?notice=started", status_code=303)
+    return RedirectResponse("/settings?notice=saved", status_code=303)
 
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "bot": telegram_app is not None}
+    snap = telegram_runtime.snapshot()
+    return {"ok": True, "bot": snap["running"], "username": snap["username"]}
 
 
 def _mask(token: str) -> str:

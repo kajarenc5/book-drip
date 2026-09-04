@@ -21,6 +21,24 @@ def test_health_and_library(data_dir):
         assert today.status_code == 200
         future = client.get("/read/slow-reading/4", follow_redirects=False)
         assert future.status_code == 302
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["ok"] is True
+        assert health.json()["bot"] is False
+        settings = client.get("/settings")
+        assert settings.status_code == 200
+        assert "Bot is idle" in settings.text
+        saved = client.post(
+            "/settings",
+            data={
+                "timezone": "Asia/Yerevan",
+                "delivery_hhmm": "08:00",
+                "telegram_bot_token": "",
+            },
+            follow_redirects=False,
+        )
+        assert saved.status_code == 303
+        assert "notice=saved" in saved.headers["location"]
 
 
 def test_upload_generic_txt(data_dir, tmp_path):

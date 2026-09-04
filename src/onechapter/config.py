@@ -16,7 +16,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 
 HOST = os.environ.get("ONECHAPTER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ONECHAPTER_PORT", "43147"))
-DEFAULT_TIMEZONE = os.environ.get("ONECHAPTER_TIMEZONE", "Europe/Moscow")
+DEFAULT_TIMEZONE = os.environ.get("ONECHAPTER_TIMEZONE", "Asia/Yerevan")
 DEFAULT_DELIVERY = os.environ.get("ONECHAPTER_DELIVERY", "08:00")
 
 
