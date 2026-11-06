@@ -103,6 +103,22 @@ def test_detects_tarasov_from_filename():
     assert result.profile == "tarasov"
 
 
+def test_ingest_stores_tarasov_under_stable_slug(data_dir):
+    from onechapter.db import init_db
+    from onechapter.library import ingest_file
+
+    init_db()
+    path = data_dir / "vladimir_tarasov_tehnologiya_zhi.txt"
+    path.write_text(_tarasov_text(), encoding="utf-8")
+
+    book = ingest_file(path)
+
+    assert book["slug"] == "tehnologiya-zhizni"
+    assert book["language"] == "ru"
+    assert book["profile"] == "tarasov"
+    assert book["chapter_count"] >= 70
+
+
 def test_skips_missing_edition_title():
     book = ExtractedBook(
         filename="tarasov.mobi",
