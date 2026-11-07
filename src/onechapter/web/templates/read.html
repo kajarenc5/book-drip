@@ -4,12 +4,12 @@
   <article class="chapter">
     <p class="kicker">
       <a href="/book/{{ book.slug }}">{{ book.title }}</a>
-      · Day {{ chapter.position + 1 }} of {{ state.total }}
+      · Day {{ chapter.position|add:1 }} of {{ state.total }}
       {% if chapter.part %} · {{ chapter.part }}{% endif %}
     </p>
     <h1>{{ chapter.title }}</h1>
     <div class="prose">
-      {% for para in chapter.body | paragraphs %}
+      {% for para in chapter.body|paragraphs %}
         <p>{{ para }}</p>
       {% endfor %}
     </div>
@@ -26,6 +26,7 @@
       {% endif %}
     </nav>
     <form class="note" method="post" action="/read/{{ book.slug }}/{{ chapter.position }}/note">
+      {% csrf_token %}
       <label for="note">A line to keep</label>
       <textarea id="note" name="body" rows="3" placeholder="What does this ask of today?"></textarea>
       <button class="btn small" type="submit">Keep</button>

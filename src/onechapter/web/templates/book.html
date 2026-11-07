@@ -8,15 +8,18 @@
     <div class="actions">
       {% if not state or state.status == 'idle' %}
         <form method="post" action="/book/{{ book.slug }}/start">
+          {% csrf_token %}
           <button class="btn" type="submit">Begin today</button>
         </form>
       {% elif state.status == 'active' %}
         <a class="btn" href="/">Today’s chapter</a>
         <form method="post" action="/book/{{ book.slug }}/pause">
+          {% csrf_token %}
           <button class="btn ghost" type="submit">Pause</button>
         </form>
       {% elif state.status == 'paused' %}
         <form method="post" action="/book/{{ book.slug }}/resume">
+          {% csrf_token %}
           <button class="btn" type="submit">Resume</button>
         </form>
       {% endif %}
@@ -27,14 +30,14 @@
       <li class="{% if ch.unlocked %}open{% else %}locked{% endif %}">
         {% if ch.unlocked %}
           <a href="/read/{{ book.slug }}/{{ ch.position }}">
-            <span class="n">{{ ch.position + 1 }}</span>
+            <span class="n">{{ ch.position|add:1 }}</span>
             <span class="t">{{ ch.title }}</span>
             {% if ch.part %}<span class="p">{{ ch.part }}</span>{% endif %}
             <span class="w">{{ ch.word_count }} words</span>
           </a>
         {% else %}
           <div>
-            <span class="n">{{ ch.position + 1 }}</span>
+            <span class="n">{{ ch.position|add:1 }}</span>
             <span class="t">{{ ch.title }}</span>
             {% if ch.part %}<span class="p">{{ ch.part }}</span>{% endif %}
             <span class="w">locked</span>

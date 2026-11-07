@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> None:
         port = getattr(args, "port", PORT)
         import uvicorn
 
-        uvicorn.run("onechapter.web.app:app", host=host, port=port, reload=False)
+        uvicorn.run("onechapter.project.asgi:application", host=host, port=port, reload=False)
         return
 
     if args.cmd == "ingest":

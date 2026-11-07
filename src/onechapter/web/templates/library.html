@@ -6,6 +6,7 @@
     <h1>Choose a book, or bring your own.</h1>
     <p class="lede">Drop the MOBI of <em>Технология жизни</em> here. The splitter knows Tarasov’s short essays by title, so you get one parable a day, not one of the four large parts.</p>
     <form class="drop" action="/upload" method="post" enctype="multipart/form-data">
+      {% csrf_token %}
       <label>
         <span>Upload .mobi, .epub, .fb2, or .txt</span>
         <input type="file" name="file" required accept=".mobi,.azw,.azw3,.epub,.fb2,.txt,.html,.md" onchange="this.form.submit()">
@@ -23,7 +24,7 @@
         <a href="/book/{{ book.slug }}">
           <span class="days">{{ book.chapter_count }} days</span>
           <strong>{{ book.title }}</strong>
-          <em>{{ book.author or "Unknown" }}</em>
+          <em>{{ book.author|default:"Unknown" }}</em>
           {% if plan and plan.slug == book.slug %}
             <span class="now">reading now</span>
           {% endif %}
