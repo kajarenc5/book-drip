@@ -13,6 +13,7 @@
       <p class="flash ok">Saved.</p>
     {% endif %}
     <form class="settings" method="post" action="/settings">
+      {% csrf_token %}
       <label>
         Timezone
         <input type="text" name="timezone" value="{{ reader.timezone }}" required>
@@ -23,7 +24,7 @@
       </label>
       <label>
         Bot token {% if has_token %}<span class="hint">saved {{ token_masked }}</span>{% endif %}
-        <input type="password" name="telegram_bot_token" placeholder="{{ 'leave blank to keep' if has_token else '123456:ABC…' }}" autocomplete="off">
+        <input type="password" name="telegram_bot_token" placeholder="{% if has_token %}leave blank to keep{% else %}123456:ABC…{% endif %}" autocomplete="off">
       </label>
       <button class="btn" type="submit">Save{% if not bot_running %} and start bot{% endif %}</button>
     </form>

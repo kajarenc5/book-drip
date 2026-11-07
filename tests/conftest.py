@@ -1,4 +1,10 @@
+import os
+
+import django
 import pytest
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "onechapter.project.settings")
+django.setup()
 
 from onechapter import config
 

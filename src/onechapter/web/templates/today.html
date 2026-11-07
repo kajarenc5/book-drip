@@ -13,7 +13,7 @@
           <input type="file" name="file" form="hero-upload" onchange="this.form.submit()" accept=".mobi,.azw,.azw3,.epub,.fb2,.txt,.html,.md">
         </label>
       </div>
-      <form id="hero-upload" action="/upload" method="post" enctype="multipart/form-data" hidden></form>
+      <form id="hero-upload" action="/upload" method="post" enctype="multipart/form-data" hidden>{% csrf_token %}</form>
     </section>
     {% if books %}
       <ol class="shelf compact">
@@ -22,23 +22,23 @@
             <a href="/book/{{ book.slug }}">
               <span class="days">{{ book.chapter_count }} days</span>
               <strong>{{ book.title }}</strong>
-              <em>{{ book.author or "Unknown" }}</em>
+              <em>{{ book.author|default:"Unknown" }}</em>
             </a>
           </li>
         {% endfor %}
       </ol>
     {% endif %}
   {% else %}
-    <article class="chapter" lang="{{ 'ru' if plan.author and 'Тарасов' in (plan.author or '') else 'en' }}">
+    <article class="chapter" lang="{{ chapter_lang }}">
       <p class="kicker">
-        Day {{ state.unlocked_through + 1 }} of {{ state.total }}
+        Day {{ state.unlocked_through|add:1 }} of {{ state.total }}
         {% if chapter.part %} · {{ chapter.part }}{% endif %}
         {% if state.status == 'paused' %} · paused{% endif %}
       </p>
       <h1>{{ chapter.title }}</h1>
       <p class="meta">{{ plan.book_title }}{% if plan.author %} · {{ plan.author }}{% endif %}</p>
       <div class="prose">
-        {% for para in chapter.body | paragraphs %}
+        {% for para in chapter.body|paragraphs %}
           <p>{{ para }}</p>
         {% endfor %}
       </div>
@@ -48,6 +48,7 @@
         <p class="tomorrow">This is the last chapter.</p>
       {% endif %}
       <form class="note" method="post" action="/read/{{ plan.slug }}/{{ chapter.position }}/note">
+        {% csrf_token %}
         <label for="note">A line to keep</label>
         <textarea id="note" name="body" rows="3" placeholder="What does this ask of today?"></textarea>
         <button class="btn small" type="submit">Keep</button>

@@ -16,7 +16,7 @@ Tarasov’s book is a sequence of parables. Reading three in a row is easy; reme
 
 ## Run it
 
-You need Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+You need Python 3.12+ and [uv](https://docs.astral.sh/uv/). The web reader is Django 5.2, the current long-term support release.
 
 ```bash
 cp .env.example .env
@@ -72,7 +72,9 @@ Default delivery is 08:00 in `Asia/Yerevan`. Change both on Settings or with `/t
 src/onechapter/
   ingest/     MOBI/EPUB/FB2 → chapters (Tarasov profile + generic headings)
   bot/        Telegram commands and the once-a-minute delivery tick
-  web/        local reader
+  project/    Django 5.2 settings, URLs, and ASGI entry
+  reader/     Django views for the local reader
+  web/        templates and static files
   reading.py  calendar math (one unlock per local day)
 ```
 
