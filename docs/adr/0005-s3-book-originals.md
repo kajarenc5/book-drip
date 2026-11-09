@@ -1,40 +1,53 @@
-# ADR 0005: Original uploads live in S3
+# ADR 0005: S3 storage layout, immutable book uploads, and safe reprocessing
 
 - Status: Proposed
 - Date: 2026-11-09
 
 ## Context
 
-A web upload or a Telegram document is written to `data/uploads`, then `ingest_file` splits it and stores chapters in the database. The book row keeps `source_filename` only. The parser needs a local path. After ingest, the durable content is the chapter text, and the original file is how that text can be built again.
+When a book file (`.mobi`, `.epub`, `.fb2`, `.txt`, `.html`) is uploaded via the web Library or sent to `@one_chapter_bot` on Telegram, the parser (`extract_path` + `split_extracted`) requires a local file path to extract and split the book into daily chapters.
 
-The operator's own MOBI, EPUB, and FB2 files must be recoverable when the splitter changes or the chapter rows have to be recreated. They must not be public. Seeded books already live in the git repository and are out of scope.
+Previously, uploaded files were written only to local disk (`data/uploads/`), and re-uploading a book with the same slug and filename ran `DELETE FROM chapters WHERE book_id = ?` followed by a fresh insert—allowing any user to overwrite an existing book and risking orphaned or shifted reflections if chapter positions changed.
 
-Re-ingest today, when the slug and filename match, deletes that book's chapter rows and inserts them again. Plans, deliveries, and reflections point at a chapter position, not a chapter id, so they remain. A different split can attach them to a different chapter.
+In the deployed architecture, the single private S3 bucket in `eu-north-1` serves as the durable object store for the entire system: original book files, PostgreSQL backups ([ADR 0004](0004-postgresql-and-django-orm.md)), and future user media such as voice reflections ([ADR 0007](0007-extensible-reflections-and-media.md)).
 
 ## Decision
 
-Store each uploaded original in one private S3 General Purpose bucket in `eu-north-1`, storage class **S3 Standard**.
+Create one private S3 General Purpose bucket in `eu-north-1` using storage class **S3 Standard** with a structured key prefix layout:
 
-- Block Public Access on.
-- Default encryption on (SSE-S3). Traffic uses HTTPS.
-- The app's IAM role is the only writer and reader. Scope it to this bucket.
-- Object key: `originals/{sha256}/{filename}`. The book row stores that key.
-- Versioning on, so an overwrite can be undone. A lifecycle rule expires noncurrent versions. A second rule aborts incomplete multipart uploads, which otherwise keep billing.
-- The server uploads the bytes, downloads them to a temporary file for the existing parser, ingests, stores the key, and deletes the temp file.
-- A reprocess command lists the bucket or reads the stored key, downloads to a temp file, and runs the same ingest.
+| Prefix | Contents | Retention / Mutability |
+| --- | --- | --- |
+| `originals/{sha256}/{filename}` | Uploaded book files (`.mobi`, `.epub`, `.fb2`, etc.) | Immutable; retained permanently |
+| `backups/postgres/{timestamp}.dump` | Automated PostgreSQL `pg_dump` / WAL archives ([ADR 0004](0004-postgresql-and-django-orm.md)) | Lifecycle rule expires noncurrent/old daily backups after 30 days |
+| `media/reflections/{reader_id}/{uuid}.{ext}` | Future voice/audio chapter reflections ([ADR 0007](0007-extensible-reflections-and-media.md)) | Retained with the reflection; served via short-lived Presigned GET URLs |
 
-S3 Standard is the class because a reprocess is an immediate download. Infrequent Access and Glacier add a minimum billable size and a minimum storage duration, documented on the [S3 pricing page](https://aws.amazon.com/s3/pricing/). A few book files are a small charge next to the app server. Do not turn on cross-region replication.
+Bucket security and lifecycle configuration:
+
+- **Block Public Access:** Enabled (`BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets`).
+- **Encryption:** Default encryption enabled (`SSE-S3`), HTTPS-only bucket policy (`aws:SecureTransport`).
+- **Access control:** Only the EC2 instance IAM role (and local operator profile `book-drip-local`) can read/write the bucket.
+- **Versioning & Multipart cleanup:** Versioning enabled; lifecycle rules expire noncurrent versions after 30 days and abort incomplete multipart uploads after 7 days.
+
+### Upload, Deduplication, and Operator-Only Reprocessing Rules
+
+1. **Content-addressed deduplication (no user overwrites):**
+   - On upload (Web or Telegram), the server computes the file's `sha256` digest.
+   - If a `Book` with `source_sha256 = sha256` already exists in PostgreSQL, the server **does not overwrite or re-ingest** the book; it immediately returns/starts the existing `Book`.
+   - If a new file produces a title `slug` that collides with an existing book of a *different* `sha256`, regular reader uploads never overwrite the existing book: if it is the same canonical book (e.g., Tarasov's `tehnologiya-zhizni` already in the library), the existing book is used; otherwise a disambiguated slug (`{slug}-2`) is created.
+   - For a genuinely new book, the server uploads the bytes to `s3://<bucket>/originals/{sha256}/{filename}`, runs ingestion on a temporary file in a worker thread (`asyncio.to_thread`), inserts the `Book` (storing `s3_key` and `source_sha256`) and its `Chapter` rows in a database transaction, and deletes the temporary file.
+
+2. **Operator-only reprocess (`onechapter reprocess <slug>`):**
+   - Only an operator (via CLI/Django Admin) can trigger reprocessing of an existing book when splitter logic improves.
+   - Reprocess downloads `s3_key` from S3 to a temp file, runs the updated splitter, and **upserts `Chapter` rows in place** matching by stable `chapter_key` ([ADR 0007](0007-extensible-reflections-and-media.md)) rather than blindly deleting all chapter rows.
 
 ## Consequences
 
-- The instance disk no longer holds the only copy of an upload.
-- If the books table is empty, the bucket is still the catalog: list `originals/` and ingest each object.
-- Reprocess rebuilds chapter text. It does not rebuild the reading calendar or notes. Those come from Aurora backups ([ADR 0004](0004-aurora-postgresql.md)).
-- Reprocess that changes chapter boundaries can leave a reflection or a delivery on the wrong position. The command should be deliberate, not automatic on every deploy.
-- The same path serves the Library upload and a Telegram document.
+- No durable state lives exclusively on the EC2 instance's local filesystem; both the book archive (`originals/`) and database backups (`backups/postgres/`) live in S3.
+- Regular readers can freely contribute books to the shared library without any risk of overwriting or corrupting an existing book that other readers are currently reading ([ADR 0006](0006-unified-identity-and-access-control.md)).
+- S3 Standard avoids minimum object size and minimum duration penalties from S3-IA/Glacier while costing only cents per month for book files and compressed DB dumps.
 
 ## Alternatives considered
 
-- **Keep originals on the EBS volume.** They disappear when the instance is replaced, which is the failure this decision exists to avoid.
-- **Store the original bytes in Aurora.** Competes with the 1 GiB Free plan cap and mixes a file archive with reading state.
-- **EFS mounted on the server.** A shared filesystem for one writer and rare reads. S3 matches "put a file, get it back later" without a mount.
+- **Keep uploads only on the EC2 EBS volume.** Replacing the EC2 instance would lose the original `.mobi`/`.epub` files needed to re-split books or rebuild from scratch.
+- **Store book binary files (`BYTEA`) inside PostgreSQL.** Bloats database backups (`pg_dump`) and memory usage with static multi-megabyte files that belong in object storage.
+- **Allow re-uploads with the same filename to replace chapter rows automatically.** Unsafe in a multi-user shared library; a second user uploading a different edition or malformed file would overwrite the book for everyone.

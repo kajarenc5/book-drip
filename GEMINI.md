@@ -47,6 +47,7 @@ Where this guidance conflicts with the project's own instructions, the project's
 
 ### Help level
 
+- Current saved setting: `help_level: HIGH`
 - help_level (required): LOW, MEDIUM, or HIGH. While a user is building, you MUST ask the user: "How much guidance would you like from me? Low (I only flag security risks), medium (I ask a couple of clarifying questions if something seems off), or high (I explain what I'm doing, suggest alternatives, and flag best practices)."
 
 You CAN update this rule file to save a user's help_level.
@@ -106,6 +107,26 @@ Constraints for each level:
 
 ## Workflow Reminders Before AWS Work
 
-- Ask the user how much guidance they want before building on AWS: **low** (flag security risks only), **medium** (ask up to a couple of questions when something looks off), or **high** (explain each step, suggest alternatives, flag best practices).
+- The user's saved guidance preference is `help_level: HIGH` (explain what each step does and why, suggest alternatives when a better approach exists, flag best practices and trade-offs, and still execute the user's choice if they disagree).
 - Ask before leaving newly created AWS resources in the project so the user can choose to delete them or keep them.
+
+## Target Architecture & Key Decisions (`docs/architecture/` & `docs/adr/`)
+
+- **Edge & Domains ([ADR 0001](docs/adr/0001-cloudflare-edge.md), [ADR 0002](docs/adr/0002-public-landing-and-private-app.md))**:
+  - `onechapter.am` stays registered at `name.am` with Cloudflare as authoritative DNS and HTTPS edge.
+  - `onechapter.am` is a public static landing page on Cloudflare; `app.onechapter.am` is the Django web reader (gated by Cloudflare Access in Stage 1 while invite-only, opening to public sign-up in Stage 2).
+  - Django serves static assets in production (`DEBUG=False`) via `WhiteNoise` with content-hashed filenames cached at Cloudflare.
+- **Compute & Database ([ADR 0003](docs/adr/0003-one-app-server.md), [ADR 0004](docs/adr/0004-postgresql-and-django-orm.md))**:
+  - **One Graviton EC2 instance** in `eu-north-1` runs Docker Compose (`proxy`, `app`, `db`, `db-backup`) within a ~\$9–\$12/month budget so the \$100.00 Free Plan credit lasts through `2027-05-06`.
+  - **PostgreSQL 17 runs in a Docker container on the same EC2 instance** (bound only to the internal Docker network, backed by the EBS `gp3` volume) with automated daily and pre-deploy backups (`pg_dump` / WAL-G) to S3 (`backups/postgres/`). **Do not use Aurora Serverless v2** (the 1-minute delivery check prevents `0 ACU` auto-pause and would burn ~\$45+/month of credits, plus 15-second cold starts).
+  - **Use Django 5.2 ORM & Migrations from day 1** (replacing the legacy raw-SQL `src/onechapter/db.py` layer). Blocking CPU/IO work (`ingest_file`, S3 calls) must run off the main asyncio event loop (`asyncio.to_thread` / `sync_to_async`).
+- **S3 Layout & Reprocessing ([ADR 0005](docs/adr/0005-s3-book-originals.md))**:
+  - Single private S3 Standard bucket in `eu-north-1` with prefixes: `originals/{sha256}/{filename}` (immutable uploaded books), `backups/postgres/` (automated DB dumps), and `media/reflections/{reader_id}/{uuid}.{ext}` (future voice reflections).
+- **Identity, Shared Library & Reflections ([ADR 0006](docs/adr/0006-unified-identity-and-access-control.md), [ADR 0007](docs/adr/0007-extensible-reflections-and-media.md))**:
+  - One shared Telegram bot (`@one_chapter_bot`) for all readers.
+  - Canonical `Reader` profile + `ChannelIdentity` table (`channel` in `telegram`, `signal`, `whatsapp`, `email`) keeps Web and Telegram identity unified via **Login with Telegram** now, and extends cleanly to Email/OAuth and Signal/WhatsApp later.
+  - Access starts as invite-only (`ONECHAPTER_ACCESS_MODE=invite`) and switches to `public` later.
+  - Books in the library are shared: any authorized reader can upload a new book and read books uploaded by others **without exposing who uploaded the book** (`uploaded_by` is internal audit only). Regular users **cannot overwrite, re-split, or delete existing books**; only operators can run `reprocess`.
+  - `Chapter` carries a stable `chapter_key`, and `Reflection` stores `(reader, book, chapter, chapter_key, chapter_position_snapshot, chapter_title_snapshot)` plus media fields (`kind`, `audio_s3_key`, `transcript_text`) so notes and future audio messages survive book reprocessing and re-reading.
+
 
