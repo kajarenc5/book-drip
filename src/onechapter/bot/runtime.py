@@ -27,7 +27,15 @@ log = logging.getLogger(__name__)
 
 
 def build_application(token: str) -> Application:
-    app = Application.builder().token(token).build()
+    app = (
+        Application.builder()
+        .token(token)
+        .connect_timeout(15.0)
+        .read_timeout(15.0)
+        .write_timeout(15.0)
+        .get_updates_connect_timeout(15.0)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("today", cmd_today))
