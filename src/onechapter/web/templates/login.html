@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Sign in · One Chapter{% endblock %}
+{% block main %}
+  <section class="hero narrow">
+    <p class="kicker">Sign in</p>
+    <h1>Continue your daily reading.</h1>
+    <p class="lede">Sign in with Telegram to keep your active book, calendar, and reflections unified across the web reader and Telegram.</p>
+    {% if notice == 'invalid' %}
+      <p class="flash">Telegram login signature could not be verified. Please try again.</p>
+    {% elif notice == 'expired' %}
+      <p class="flash">That magic sign-in link has expired. Send <code>/login</code> to the bot for a fresh link.</p>
+    {% elif notice == 'invite_only' %}
+      <p class="flash">One Chapter is currently invite-only. Ask the operator for an invite code first.</p>
+    {% endif %}
+    {% if bot_username %}
+      <div class="actions">
+        <script async src="https://telegram.org/js/telegram-widget.js?22"
+                data-telegram-login="{{ bot_username }}"
+                data-size="large"
+                data-auth-url="{{ public_url }}/auth/telegram"
+                data-request-access="write"></script>
+      </div>
+      <p class="meta">Or open <a href="https://t.me/{{ bot_username }}">@{{ bot_username }}</a> on Telegram and send <code>/login</code> for a one-tap sign-in link.</p>
+    {% else %}
+      <p class="meta">Open the One Chapter Telegram bot and send <code>/login</code> to receive a one-tap sign-in link.</p>
+    {% endif %}
+  </section>
+{% endblock %}

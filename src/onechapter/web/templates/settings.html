@@ -22,11 +22,13 @@
         Daily time
         <input type="time" name="delivery_hhmm" value="{{ reader.delivery_hhmm }}" required>
       </label>
+      {% if can_edit_token %}
       <label>
         Bot token {% if has_token %}<span class="hint">saved {{ token_masked }}</span>{% endif %}
         <input type="password" name="telegram_bot_token" placeholder="{% if has_token %}leave blank to keep{% else %}123456:ABC…{% endif %}" autocomplete="off">
       </label>
-      <button class="btn" type="submit">Save{% if not bot_running %} and start bot{% endif %}</button>
+      {% endif %}
+      <button class="btn" type="submit">Save{% if not bot_running and can_edit_token %} and start bot{% endif %}</button>
     </form>
     <p class="meta">
       {% if bot_running %}

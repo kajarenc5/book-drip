@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  One Chapter (onechapter.am) infrastructure in eu-north-1:
+  Private S3 Standard bucket (originals/, backups/postgres/, media/reflections/),
+  Graviton EC2 instance running Docker Compose (Caddy, Django/Bot, PostgreSQL 17, S3 Backup),
+  Cloudflare-only HTTPS Security Group, and SSM Session Manager IAM Role.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues:
+      - t4g.nano
+      - t4g.micro
+      - t4g.small
+    Description: Graviton burstable EC2 instance size in eu-north-1.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Latest Amazon Linux 2023 ARM64 AMI from SSM Parameter Store.
+
+  VolumeSizeGiB:
+    Type: Number
+    Default: 20
+    MinValue: 16
+    MaxValue: 100
+    Description: Root EBS gp3 volume size in GiB.
+
+Rules:
+  EnforceEuNorth1Region:
+    Assertions:
+      - Assert: !Equals [!Ref "AWS::Region", "eu-north-1"]
+        AssertDescription: All regional resources for this project MUST be created in eu-north-1.
+
+Resources:
+  OneChapterBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "onechapter-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: ExpireOldPostgresBackups
+            Status: Enabled
+            Prefix: backups/postgres/onechapter-
+            ExpirationInDays: 30
+
+  OneChapterBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref OneChapterBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnforceTLSRequestsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt OneChapterBucket.Arn
+              - !Sub "${OneChapterBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  OneChapterInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onechapter-ec2-role-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: OneChapterS3BucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListBucketPrefixes
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !GetAtt OneChapterBucket.Arn
+              - Sid: ReadWriteObjectsInScopedPrefixes
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub "${OneChapterBucket.Arn}/originals/*"
+                  - !Sub "${OneChapterBucket.Arn}/backups/postgres/*"
+                  - !Sub "${OneChapterBucket.Arn}/media/reflections/*"
+
+  OneChapterInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref OneChapterInstanceRole
+
+  OneChapterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inbound HTTPS (443) only from Cloudflare published IPv4/IPv6 ranges; no SSH.
+      SecurityGroupIngress:
+        # Cloudflare published IPv4 ranges (https://www.cloudflare.com/ips-v4)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 173.245.48.0/20
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 103.21.244.0/22
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 103.22.200.0/22
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 103.31.4.0/22
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 141.101.64.0/18
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 108.162.192.0/18
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 190.93.240.0/20
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 188.114.96.0/20
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 197.234.240.0/22
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 198.41.128.0/17
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 162.158.0.0/15
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 104.16.0.0/13
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 104.24.0.0/14
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 172.64.0.0/13
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 131.0.72.0/22
+        # Cloudflare published IPv6 ranges (https://www.cloudflare.com/ips-v6)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: 2400:cb00::/32
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: 2606:4700::/32
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: 2803:f800::/32
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: 2405:b500::/32
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: 2405:8100::/32
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: 2a06:98c0::/29
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: 2c0f:f248::/32
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: -1
+          CidrIpv6: ::/0
+
+  OneChapterInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref OneChapterInstanceProfile
+      SecurityGroupIds:
+        - !GetAtt OneChapterSecurityGroup.GroupId
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref VolumeSizeGiB
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: onechapter-app
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf update -y
+          dnf install -y docker git
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -SL "https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-aarch64" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          systemctl enable --now docker
+          mkdir -p /opt/onechapter /etc/onechapter/certs
+          echo "ONECHAPTER_S3_BUCKET=${OneChapterBucket}" >> /etc/environment
+          echo "AWS_REGION=${AWS::Region}" >> /etc/environment
+
+  OneChapterEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref OneChapterInstance
+      Tags:
+        - Key: Name
+          Value: onechapter-eip
+
+Outputs:
+  BucketName:
+    Description: Private S3 bucket for book originals, PostgreSQL backups, and future reflections media.
+    Value: !Ref OneChapterBucket
+
+  InstanceId:
+    Description: EC2 Instance ID (connect via AWS Systems Manager Session Manager).
+    Value: !Ref OneChapterInstance
+
+  PublicIp:
+    Description: Elastic IP address to point Cloudflare A record (app.onechapter.am, orange-cloud proxied) to.
+    Value: !Ref OneChapterEIP

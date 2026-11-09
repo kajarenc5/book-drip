@@ -43,10 +43,12 @@ class PlanState:
         return self.unlocked_through
 
 
-def parse_date(value: str | None) -> date | None:
+def parse_date(value: str | date | None) -> date | None:
     if not value:
         return None
-    return date.fromisoformat(value)
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
 def today_in(tz_name: str, now: datetime | None = None) -> date:

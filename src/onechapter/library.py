@@ -1,16 +1,27 @@
 from __future__ import annotations
 
-import sqlite3
-from datetime import datetime
+import uuid
+from datetime import date, datetime
 from pathlib import Path
 
-from onechapter import config
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError, transaction
+from django.db.models import Case, Count, IntegerField, Sum, Value, When
+from django.db.models.functions import Coalesce
+
+from onechapter import config, storage
 from onechapter.config import DEFAULT_DELIVERY, DEFAULT_TIMEZONE, ensure_dirs
-from onechapter.db import db, init_db
+from onechapter.db import init_db
 from onechapter.ingest.extract import extract_path
-from onechapter.ingest.split import SplitResult, split_extracted
+from onechapter.ingest.split import ChapterDraft, SplitResult, split_extracted
 from onechapter.ingest.textutil import slugify
 from onechapter.reading import ChapterView, PlanState, plan_state, today_in
+
+
+def _is_conn(obj) -> bool:
+    if obj is None:
+        return True
+    return hasattr(obj, "cursor") or hasattr(obj, "execute")
 
 
 def bootstrap() -> None:
@@ -21,357 +32,841 @@ def bootstrap() -> None:
     seed_builtin_books()
 
 
-def list_books(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute(
-        """
-        SELECT b.*, COUNT(c.id) AS chapter_count, SUM(c.word_count) AS word_count
-        FROM books b
-        LEFT JOIN chapters c ON c.book_id = b.id
-        GROUP BY b.id
-        ORDER BY b.id
-        """
-    ).fetchall()
+def compute_chapter_keys(chapters: list[ChapterDraft]) -> list[tuple[ChapterDraft, str, str]]:
+    """Compute deterministic (draft, chapter_key, content_sha256) tuples for a split book."""
+    seen: dict[str, int] = {}
+    out: list[tuple[ChapterDraft, str, str]] = []
+    for ch in chapters:
+        base_key = slugify(ch.title)
+        if not base_key or base_key == "book":
+            base_key = f"pos-{ch.index}"
+        count = seen.get(base_key, 0) + 1
+        seen[base_key] = count
+        key = base_key if count == 1 else f"{base_key}-{count}"
+        content_hash = storage.sha256_bytes(ch.body.strip().encode("utf-8"))
+        out.append((ch, key, content_hash))
+    return out
 
 
-def get_book(conn: sqlite3.Connection, slug: str) -> sqlite3.Row | None:
-    return conn.execute(
-        """
-        SELECT b.*, COUNT(c.id) AS chapter_count
-        FROM books b
-        LEFT JOIN chapters c ON c.book_id = b.id
-        WHERE b.slug = ?
-        GROUP BY b.id
-        """,
-        (slug,),
-    ).fetchone()
+def list_books(conn=None):
+    from onechapter.reader.models import Book
+
+    init_db()
+    return list(
+        Book.objects.annotate(
+            chapter_count=Count("chapters"),
+            word_count=Coalesce(Sum("chapters__word_count"), 0),
+        ).order_by("id")
+    )
 
 
-def get_book_by_id(conn: sqlite3.Connection, book_id: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
+def get_book(conn_or_slug, slug: str | None = None):
+    from onechapter.reader.models import Book
+
+    init_db()
+    actual_slug = slug if _is_conn(conn_or_slug) else conn_or_slug
+    if not actual_slug:
+        return None
+    return (
+        Book.objects.annotate(
+            chapter_count=Count("chapters"),
+            word_count=Coalesce(Sum("chapters__word_count"), 0),
+        )
+        .filter(slug=actual_slug)
+        .first()
+    )
 
 
-def list_chapters(conn: sqlite3.Connection, book_id: int) -> list[sqlite3.Row]:
-    return conn.execute(
-        "SELECT * FROM chapters WHERE book_id = ? ORDER BY position",
-        (book_id,),
-    ).fetchall()
+def get_book_by_id(conn_or_id, book_id: int | None = None):
+    from onechapter.reader.models import Book
+
+    init_db()
+    actual_id = book_id if _is_conn(conn_or_id) else conn_or_id
+    return Book.objects.filter(id=actual_id).first()
 
 
-def get_chapter(conn: sqlite3.Connection, book_id: int, position: int) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM chapters WHERE book_id = ? AND position = ?",
-        (book_id, position),
-    ).fetchone()
+def list_chapters(conn_or_book_id, book_id: int | None = None):
+    from onechapter.reader.models import Chapter
+
+    init_db()
+    actual_book_id = book_id if _is_conn(conn_or_book_id) else conn_or_book_id
+    return list(Chapter.objects.filter(book_id=actual_book_id).order_by("position"))
+
+
+def get_chapter(conn_or_book_id, book_id_or_pos: int, position: int | None = None):
+    from onechapter.reader.models import Chapter
+
+    init_db()
+    if _is_conn(conn_or_book_id) and position is not None:
+        actual_book_id = book_id_or_pos
+        actual_pos = position
+    else:
+        actual_book_id = conn_or_book_id
+        actual_pos = book_id_or_pos
+    return Chapter.objects.filter(book_id=actual_book_id, position=actual_pos).first()
 
 
 def upsert_book_from_split(
-    conn: sqlite3.Connection,
-    split: SplitResult,
+    conn_or_split,
+    split_arg: SplitResult | None = None,
     *,
     slug: str | None = None,
     filename: str | None = None,
     language: str | None = None,
-) -> sqlite3.Row:
-    slug = slug or slugify(split.title)
-    base = slug
+    source_sha256: str | None = None,
+    s3_key: str | None = None,
+    uploaded_by=None,
+    allow_replace: bool = False,
+):
+    from onechapter.reader.models import Book
+
+    init_db()
+    split: SplitResult = split_arg if _is_conn(conn_or_split) else conn_or_split  # type: ignore[assignment]
+
+    if source_sha256 and not allow_replace:
+        by_hash = Book.objects.filter(source_sha256=source_sha256).first()
+        if by_hash:
+            return get_book(by_hash.slug)
+
+    target_slug = slug or slugify(split.title)
+    base = target_slug
     n = 2
-    while True:
-        existing = conn.execute("SELECT id FROM books WHERE slug = ?", (slug,)).fetchone()
-        if not existing:
-            break
-        # Replace if this is a re-ingest of the same source.
-        if filename:
-            same = conn.execute(
-                "SELECT id FROM books WHERE slug = ? AND source_filename = ?",
-                (slug, filename),
-            ).fetchone()
-            if same:
-                _replace_book(conn, same["id"], split, filename)
-                return get_book(conn, slug)
-        slug = f"{base}-{n}"
-        n += 1
 
-    cur = conn.execute(
-        "INSERT INTO books(slug, title, author, language, profile, source_filename) VALUES (?, ?, ?, ?, ?, ?)",
-        (slug, split.title, split.author, language, split.profile, filename),
-    )
-    book_id = cur.lastrowid
-    _insert_chapters(conn, book_id, split)
-    return get_book(conn, slug)
+    with transaction.atomic():
+        while True:
+            existing = Book.objects.filter(slug=target_slug).first()
+            if not existing:
+                break
+            if allow_replace:
+                _replace_book_in_place(
+                    existing,
+                    split,
+                    filename=filename,
+                    language=language,
+                    source_sha256=source_sha256,
+                    s3_key=s3_key,
+                )
+                return get_book(existing.slug)
+            # Non-destructive upload: if canonical Tarasov or identical source filename/hash
+            # is already in the library, return the existing book without overwriting it.
+            if (
+                split.profile == "tarasov"
+                and existing.slug == "tehnologiya-zhizni"
+            ) or (
+                source_sha256 and existing.source_sha256 == source_sha256
+            ) or (
+                filename
+                and existing.source_filename == filename
+                and existing.title == split.title
+            ):
+                return get_book(existing.slug)
+            target_slug = f"{base}-{n}"
+            n += 1
 
-
-def _replace_book(conn: sqlite3.Connection, book_id: int, split: SplitResult, filename: str | None) -> None:
-    conn.execute(
-        "UPDATE books SET title = ?, author = ?, profile = ?, source_filename = ? WHERE id = ?",
-        (split.title, split.author, split.profile, filename, book_id),
-    )
-    conn.execute("DELETE FROM chapters WHERE book_id = ?", (book_id,))
-    _insert_chapters(conn, book_id, split)
-
-
-def _insert_chapters(conn: sqlite3.Connection, book_id: int, split: SplitResult) -> None:
-    conn.executemany(
-        "INSERT INTO chapters(book_id, position, part, title, body, word_count) VALUES (?, ?, ?, ?, ?, ?)",
-        [
-            (book_id, ch.index, ch.part, ch.title, ch.body, ch.words)
-            for ch in split.chapters
-        ],
-    )
-
-
-def ingest_file(path: Path, conn: sqlite3.Connection | None = None) -> sqlite3.Row:
-    extracted = extract_path(path)
-    split = split_extracted(extracted)
-    if not split.chapters:
-        raise ValueError("No chapters found in that file.")
-    language = "ru" if split.profile == "tarasov" else None
-
-    def _save(c: sqlite3.Connection) -> sqlite3.Row:
-        slug = None
-        if split.profile == "tarasov":
-            slug = "tehnologiya-zhizni"
-        return upsert_book_from_split(
-            c, split, slug=slug, filename=path.name, language=language
+        book = Book.objects.create(
+            slug=target_slug,
+            title=split.title,
+            author=split.author,
+            language=language,
+            profile=split.profile,
+            source_filename=filename,
+            source_sha256=source_sha256,
+            s3_key=s3_key,
+            uploaded_by=uploaded_by,
         )
+        _insert_chapters(book, split)
+    return get_book(book.slug)
 
-    if conn is not None:
-        return _save(conn)
-    with db() as c:
-        return _save(c)
+
+def _insert_chapters(book, split: SplitResult) -> None:
+    from onechapter.reader.models import Chapter
+
+    keyed = compute_chapter_keys(split.chapters)
+    Chapter.objects.bulk_create(
+        [
+            Chapter(
+                book=book,
+                position=ch.index,
+                chapter_key=chapter_key,
+                content_sha256=content_hash,
+                part=ch.part,
+                title=ch.title,
+                body=ch.body,
+                word_count=ch.words,
+            )
+            for ch, chapter_key, content_hash in keyed
+        ]
+    )
+
+
+def _replace_book_in_place(
+    book,
+    split: SplitResult,
+    *,
+    filename: str | None = None,
+    language: str | None = None,
+    source_sha256: str | None = None,
+    s3_key: str | None = None,
+) -> None:
+    """Update a book and its chapters in place by chapter_key so Chapter IDs and Reflections survive."""
+    from onechapter.reader.models import Chapter, Reflection
+
+    book.title = split.title
+    book.author = split.author
+    book.profile = split.profile
+    if filename is not None:
+        book.source_filename = filename
+    if language is not None:
+        book.language = language
+    if source_sha256 is not None:
+        book.source_sha256 = source_sha256
+    if s3_key is not None:
+        book.s3_key = s3_key
+    book.save()
+
+    existing_chapters = list(Chapter.objects.filter(book=book))
+    by_key = {ch.chapter_key: ch for ch in existing_chapters}
+    by_hash: dict[str, list[Chapter]] = {}
+    for ch in existing_chapters:
+        if ch.content_sha256:
+            by_hash.setdefault(ch.content_sha256, []).append(ch)
+
+    # Shift existing positions out of 0..N-1 range inside the transaction to avoid
+    # temporary unique constraint collisions when reordering chapters.
+    for idx, ch in enumerate(existing_chapters):
+        ch.position = 100_000 + idx
+        ch.save(update_fields=["position"])
+
+    keyed = compute_chapter_keys(split.chapters)
+    kept_ids: set[int] = set()
+    final_chapters_by_key: dict[str, Chapter] = {}
+
+    for draft, chapter_key, content_hash in keyed:
+        matched = by_key.get(chapter_key)
+        if matched is None or matched.id in kept_ids:
+            candidates = [c for c in by_hash.get(content_hash, []) if c.id not in kept_ids]
+            matched = candidates[0] if candidates else None
+
+        if matched is not None:
+            matched.position = draft.index
+            matched.chapter_key = chapter_key
+            matched.content_sha256 = content_hash
+            matched.part = draft.part
+            matched.title = draft.title
+            matched.body = draft.body
+            matched.word_count = draft.words
+            matched.save()
+            kept_ids.add(matched.id)
+            final_chapters_by_key[chapter_key] = matched
+        else:
+            created = Chapter.objects.create(
+                book=book,
+                position=draft.index,
+                chapter_key=chapter_key,
+                content_sha256=content_hash,
+                part=draft.part,
+                title=draft.title,
+                body=draft.body,
+                word_count=draft.words,
+            )
+            kept_ids.add(created.id)
+            final_chapters_by_key[chapter_key] = created
+
+    # Remove chapters that no longer exist in the split; Reflection.chapter uses
+    # ON DELETE SET NULL so reflections remain intact with their snapshots.
+    Chapter.objects.filter(book=book).exclude(id__in=kept_ids).delete()
+
+    # Re-anchor any reflections for this book by chapter_key.
+    for ref in Reflection.objects.filter(book=book):
+        target_ch = final_chapters_by_key.get(ref.chapter_key)
+        if target_ch is not None and ref.chapter_id != target_ch.id:
+            ref.chapter = target_ch
+            ref.save(update_fields=["chapter"])
+
+
+def ingest_file(
+    path: Path,
+    conn=None,
+    *,
+    uploaded_by=None,
+    allow_replace: bool = False,
+    s3_client=None,
+):
+    from onechapter.reader.models import Book
+
+    init_db()
+    path = Path(path)
+    raw_bytes = path.read_bytes()
+    digest = storage.sha256_bytes(raw_bytes)
+
+    if not allow_replace:
+        existing_hash = Book.objects.filter(source_sha256=digest).first()
+        if existing_hash:
+            return get_book(existing_hash.slug)
+
+    _, s3_key, temp_or_local = storage.store_original(
+        raw_bytes,
+        path.name,
+        s3_client=s3_client,
+    )
+    cleanup_temp = temp_or_local != path and config.s3_bucket() != ""
+    try:
+        extracted = extract_path(path if path.exists() else temp_or_local)
+        split = split_extracted(extracted)
+        if not split.chapters:
+            raise ValueError("No chapters found in that file.")
+        language = "ru" if split.profile == "tarasov" else None
+        slug = "tehnologiya-zhizni" if split.profile == "tarasov" else None
+        return upsert_book_from_split(
+            conn,
+            split,
+            slug=slug,
+            filename=path.name,
+            language=language,
+            source_sha256=digest,
+            s3_key=s3_key,
+            uploaded_by=uploaded_by,
+            allow_replace=allow_replace,
+        )
+    finally:
+        if cleanup_temp and temp_or_local.exists():
+            temp_or_local.unlink(missing_ok=True)
+
+
+def reprocess_book(slug: str, *, s3_client=None):
+    """Operator command: re-fetch the stored original from S3/uploads and re-split in place."""
+    init_db()
+    book = get_book(slug)
+    if not book:
+        raise ValueError(f"Unknown book slug: {slug}")
+    if not book.s3_key and not book.source_filename:
+        raise ValueError(f"Book '{slug}' has no stored original to reprocess.")
+
+    key = book.s3_key or book.source_filename
+    local_path, should_cleanup = storage.fetch_original_to_temp(key, s3_client=s3_client)
+    try:
+        return ingest_file(
+            local_path,
+            allow_replace=True,
+            s3_client=s3_client,
+        )
+    finally:
+        if should_cleanup and local_path.exists():
+            local_path.unlink(missing_ok=True)
 
 
 def save_upload(filename: str, data: bytes) -> Path:
     ensure_dirs()
-    safe = Path(filename).name
+    safe = storage.safe_filename(filename)
     dest = config.UPLOAD_DIR / safe
     dest.write_bytes(data)
     return dest
 
 
-def get_or_create_local_reader(conn: sqlite3.Connection) -> sqlite3.Row:
-    row = conn.execute("SELECT * FROM readers WHERE telegram_id IS NULL ORDER BY id LIMIT 1").fetchone()
-    if row:
-        return row
-    conn.execute(
-        "INSERT INTO readers(telegram_id, name, timezone, delivery_hhmm) VALUES (NULL, ?, ?, ?)",
-        ("Local reader", DEFAULT_TIMEZONE, DEFAULT_DELIVERY),
+def _ensure_django_user( reader, username_hint: str | None = None):
+    if reader.user_id:
+        return reader.user
+    User = get_user_model()
+    base = slugify(username_hint or reader.display_name or "reader") or "reader"
+    username = f"{base}-{uuid.uuid4().hex[:8]}"
+    user = User.objects.create_user(username=username)
+    reader.user = user
+    reader.save(update_fields=["user"])
+    return user
+
+
+def get_or_create_local_reader(conn=None):
+    """Return the unified primary reader in local/single-operator mode, creating one if empty."""
+    from onechapter.reader.models import Reader
+
+    init_db()
+    reader = Reader.objects.order_by("id").first()
+    if reader:
+        _ensure_django_user(reader, "reader")
+        return reader
+    reader = Reader.objects.create(
+        display_name="Local reader",
+        timezone=DEFAULT_TIMEZONE,
+        delivery_hhmm=DEFAULT_DELIVERY,
+        is_allowed=True,
+        is_operator=True,
     )
-    return conn.execute("SELECT * FROM readers WHERE telegram_id IS NULL ORDER BY id LIMIT 1").fetchone()
+    _ensure_django_user(reader, "local-reader")
+    return reader
+
+
+def get_or_create_channel_reader(
+    channel: str,
+    external_id: int | str,
+    name: str | None = None,
+    *,
+    handle: str | None = None,
+    invite_code: str | None = None,
+):
+    """Resolve or create a Reader for any messaging/login channel (telegram, signal, whatsapp, email)."""
+    from onechapter.reader.models import ChannelIdentity, Reader
+
+    init_db()
+    ext_str = str(external_id)
+    ident = (
+        ChannelIdentity.objects.select_related("reader", "reader__user")
+        .filter(channel=channel, external_id=ext_str)
+        .first()
+    )
+    allowed_now = config.is_access_allowed(ext_str, invite_code)
+
+    if ident:
+        reader = ident.reader
+        updated_fields: list[str] = []
+        if name and reader.display_name != name:
+            reader.display_name = name
+            updated_fields.append("display_name")
+        if allowed_now and not reader.is_allowed:
+            reader.is_allowed = True
+            updated_fields.append("is_allowed")
+        if updated_fields:
+            reader.save(update_fields=updated_fields)
+        if handle and ident.handle != handle:
+            ident.handle = handle
+            ident.save(update_fields=["handle"])
+        _ensure_django_user(reader, handle or name or f"{channel}-{ext_str}")
+        return reader
+
+    with transaction.atomic():
+        # If there is a single initial local Reader with no identity on this channel yet,
+        # and no other identities exist for this channel, unify them into the same Reader!
+        existing_channel_count = ChannelIdentity.objects.filter(channel=channel).count()
+        unlinked_reader = (
+            Reader.objects.exclude(channels__channel=channel).order_by("id").first()
+            if existing_channel_count == 0
+            else None
+        )
+        has_explicit_gate = bool(config.allowed_telegram_ids() or config.invite_code())
+        is_first_reader = not Reader.objects.exists() and not (
+            config.access_mode() == "invite" and has_explicit_gate
+        )
+        is_allowed = allowed_now or is_first_reader
+
+        if unlinked_reader is not None and is_allowed:
+            reader = unlinked_reader
+            if name and (not reader.display_name or reader.display_name == "Local reader"):
+                reader.display_name = name
+                reader.save(update_fields=["display_name"])
+        else:
+            reader = Reader.objects.create(
+                display_name=name or "",
+                timezone=DEFAULT_TIMEZONE,
+                delivery_hhmm=DEFAULT_DELIVERY,
+                is_allowed=is_allowed,
+                is_operator=is_first_reader or (str(external_id) in config.allowed_telegram_ids()),
+            )
+
+        _ensure_django_user(reader, handle or name or f"{channel}-{ext_str}")
+        ChannelIdentity.objects.create(
+            reader=reader,
+            channel=channel,
+            external_id=ext_str,
+            handle=handle or "",
+            is_delivery_enabled=True,
+        )
+        return reader
 
 
 def get_or_create_telegram_reader(
-    conn: sqlite3.Connection, telegram_id: int, name: str | None
-) -> sqlite3.Row:
-    row = conn.execute("SELECT * FROM readers WHERE telegram_id = ?", (telegram_id,)).fetchone()
-    if row:
-        if name and row["name"] != name:
-            conn.execute("UPDATE readers SET name = ? WHERE id = ?", (name, row["id"]))
-            row = conn.execute("SELECT * FROM readers WHERE id = ?", (row["id"],)).fetchone()
-        return row
-    conn.execute(
-        "INSERT INTO readers(telegram_id, name, timezone, delivery_hhmm) VALUES (?, ?, ?, ?)",
-        (telegram_id, name, DEFAULT_TIMEZONE, DEFAULT_DELIVERY),
+    conn_or_tg_id,
+    telegram_id_or_name: int | str | None = None,
+    name: str | None = None,
+    *,
+    handle: str | None = None,
+    invite_code: str | None = None,
+):
+    if _is_conn(conn_or_tg_id):
+        tg_id = telegram_id_or_name
+        actual_name = name
+    else:
+        tg_id = conn_or_tg_id
+        actual_name = telegram_id_or_name if isinstance(telegram_id_or_name, str) or telegram_id_or_name is None else name
+    return get_or_create_channel_reader(
+        "telegram",
+        tg_id,  # type: ignore[arg-type]
+        actual_name,
+        handle=handle,
+        invite_code=invite_code,
     )
-    return conn.execute("SELECT * FROM readers WHERE telegram_id = ?", (telegram_id,)).fetchone()
+
+
+def resolve_web_reader(request):
+    """Return the signed-in Reader, or the unified primary Reader when web login is not enforced."""
+    from onechapter.reader.models import Reader
+
+    init_db()
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_authenticated", False):
+        profile = Reader.objects.filter(user=user).first()
+        if profile:
+            return profile
+    if config.require_web_login():
+        return None
+    return get_or_create_local_reader()
 
 
 def update_reader(
-    conn: sqlite3.Connection,
-    reader_id: int,
+    conn_or_reader_id,
+    reader_id: int | None = None,
     *,
     timezone: str | None = None,
     delivery_hhmm: str | None = None,
     name: str | None = None,
 ) -> None:
-    if timezone:
-        conn.execute("UPDATE readers SET timezone = ? WHERE id = ?", (timezone, reader_id))
-    if delivery_hhmm:
-        conn.execute("UPDATE readers SET delivery_hhmm = ? WHERE id = ?", (delivery_hhmm, reader_id))
-    if name is not None:
-        conn.execute("UPDATE readers SET name = ? WHERE id = ?", (name, reader_id))
+    from onechapter.reader.models import Reader
 
-
-def get_plan(conn: sqlite3.Connection, reader_id: int, book_id: int) -> sqlite3.Row | None:
-    return conn.execute(
-        """
-        SELECT p.*, r.timezone, r.delivery_hhmm, r.telegram_id, r.name AS reader_name
-        FROM plans p
-        JOIN readers r ON r.id = p.reader_id
-        WHERE p.reader_id = ? AND p.book_id = ?
-        """,
-        (reader_id, book_id),
-    ).fetchone()
-
-
-def active_plan_for_reader(conn: sqlite3.Connection, reader_id: int) -> sqlite3.Row | None:
-    return conn.execute(
-        """
-        SELECT p.*, r.timezone, r.delivery_hhmm, r.telegram_id, r.name AS reader_name,
-               b.slug, b.title AS book_title, b.author
-        FROM plans p
-        JOIN readers r ON r.id = p.reader_id
-        JOIN books b ON b.id = p.book_id
-        WHERE p.reader_id = ? AND p.status IN ('active', 'paused')
-        ORDER BY CASE p.status WHEN 'active' THEN 0 ELSE 1 END, p.id DESC
-        LIMIT 1
-        """,
-        (reader_id,),
-    ).fetchone()
-
-
-def list_active_plans(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute(
-        """
-        SELECT p.*, r.timezone, r.delivery_hhmm, r.telegram_id, r.name AS reader_name,
-               b.slug, b.title AS book_title, b.author
-        FROM plans p
-        JOIN readers r ON r.id = p.reader_id
-        JOIN books b ON b.id = p.book_id
-        WHERE p.status = 'active' AND r.telegram_id IS NOT NULL
-        """
-    ).fetchall()
-
-
-def chapter_count(conn: sqlite3.Connection, book_id: int) -> int:
-    row = conn.execute("SELECT COUNT(*) AS n FROM chapters WHERE book_id = ?", (book_id,)).fetchone()
-    return int(row["n"])
-
-
-def state_for_plan(conn: sqlite3.Connection, plan_row: sqlite3.Row, now: datetime | None = None) -> PlanState:
-    total = chapter_count(conn, plan_row["book_id"])
-    return plan_state(plan_row, total, now)
-
-
-def start_book(conn: sqlite3.Connection, reader_id: int, book_id: int, now: datetime | None = None) -> PlanState:
-    reader = conn.execute("SELECT * FROM readers WHERE id = ?", (reader_id,)).fetchone()
-    today = today_in(reader["timezone"], now)
-    other = conn.execute(
-        "SELECT id FROM plans WHERE reader_id = ? AND status IN ('active', 'paused') AND book_id != ?",
-        (reader_id, book_id),
-    ).fetchall()
-    for row in other:
-        conn.execute("UPDATE plans SET status = 'idle', paused_on = NULL WHERE id = ?", (row["id"],))
-    existing = conn.execute(
-        "SELECT * FROM plans WHERE reader_id = ? AND book_id = ?",
-        (reader_id, book_id),
-    ).fetchone()
-    if existing:
-        conn.execute(
-            "UPDATE plans SET status = 'active', started_on = ?, paused_on = NULL WHERE id = ?",
-            (today.isoformat(), existing["id"]),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO plans(reader_id, book_id, started_on, status) VALUES (?, ?, ?, 'active')",
-            (reader_id, book_id, today.isoformat()),
-        )
-    plan = get_plan(conn, reader_id, book_id)
-    return state_for_plan(conn, plan, now)
-
-
-def pause_plan(conn: sqlite3.Connection, plan_id: int, now: datetime | None = None) -> None:
-    row = conn.execute(
-        """
-        SELECT p.*, r.timezone FROM plans p JOIN readers r ON r.id = p.reader_id WHERE p.id = ?
-        """,
-        (plan_id,),
-    ).fetchone()
-    if not row or row["status"] != "active":
+    init_db()
+    actual_id = reader_id if _is_conn(conn_or_reader_id) else conn_or_reader_id
+    reader = Reader.objects.filter(id=actual_id).first()
+    if not reader:
         return
-    today = today_in(row["timezone"], now)
-    conn.execute(
-        "UPDATE plans SET status = 'paused', paused_on = ? WHERE id = ?",
-        (today.isoformat(), plan_id),
+    if timezone:
+        reader.timezone = timezone
+    if delivery_hhmm:
+        reader.delivery_hhmm = delivery_hhmm
+    if name is not None:
+        reader.display_name = name
+    reader.save()
+
+
+def get_plan(conn_or_reader_id, reader_id_or_book_id: int, book_id: int | None = None):
+    from onechapter.reader.models import Plan
+
+    init_db()
+    if _is_conn(conn_or_reader_id) and book_id is not None:
+        r_id = reader_id_or_book_id
+        b_id = book_id
+    else:
+        r_id = conn_or_reader_id
+        b_id = reader_id_or_book_id
+    return (
+        Plan.objects.select_related("reader", "book")
+        .filter(reader_id=r_id, book_id=b_id)
+        .first()
     )
 
 
-def resume_plan(conn: sqlite3.Connection, plan_id: int, now: datetime | None = None) -> None:
-    row = conn.execute(
-        """
-        SELECT p.*, r.timezone FROM plans p JOIN readers r ON r.id = p.reader_id WHERE p.id = ?
-        """,
-        (plan_id,),
-    ).fetchone()
-    if not row or row["status"] != "paused" or not row["started_on"] or not row["paused_on"]:
-        return
-    today = today_in(row["timezone"], now)
-    from datetime import date
+def active_plan_for_reader(conn_or_reader_id, reader_id: int | None = None):
+    from onechapter.reader.models import Plan
 
-    started = date.fromisoformat(row["started_on"])
-    paused = date.fromisoformat(row["paused_on"])
+    init_db()
+    r_id = reader_id if _is_conn(conn_or_reader_id) else conn_or_reader_id
+    return (
+        Plan.objects.select_related("reader", "book")
+        .filter(reader_id=r_id, status__in=["active", "paused"])
+        .annotate(
+            status_order=Case(
+                When(status="active", then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            )
+        )
+        .order_by("status_order", "-id")
+        .first()
+    )
+
+
+def list_active_plans(conn=None):
+    from onechapter.reader.models import ChannelIdentity, Plan
+
+    init_db()
+    plans = list(
+        Plan.objects.select_related("reader", "book")
+        .filter(
+            status="active",
+            reader__is_allowed=True,
+            reader__channels__channel="telegram",
+            reader__channels__is_delivery_enabled=True,
+        )
+        .distinct()
+    )
+    reader_ids = [p.reader_id for p in plans]
+    tg_map = {
+        ci.reader_id: int(ci.external_id)
+        for ci in ChannelIdentity.objects.filter(
+            reader_id__in=reader_ids,
+            channel="telegram",
+            is_delivery_enabled=True,
+        )
+        if ci.external_id.lstrip("-").isdigit()
+    }
+    for p in plans:
+        p.reader._prefetched_telegram_id = tg_map.get(p.reader_id)
+    return [p for p in plans if p.telegram_id is not None]
+
+
+def chapter_count(conn_or_book_id, book_id: int | None = None) -> int:
+    from onechapter.reader.models import Chapter
+
+    init_db()
+    actual_book_id = book_id if _is_conn(conn_or_book_id) else conn_or_book_id
+    return Chapter.objects.filter(book_id=actual_book_id).count()
+
+
+def state_for_plan(conn_or_plan, plan_row=None, now: datetime | None = None) -> PlanState:
+    init_db()
+    actual_plan = plan_row if _is_conn(conn_or_plan) else conn_or_plan
+    total = chapter_count(None, actual_plan["book_id"])
+    return plan_state(actual_plan, total, now)
+
+
+def start_book(
+    conn_or_reader_id,
+    reader_id_or_book_id: int,
+    book_id: int | None = None,
+    now: datetime | None = None,
+) -> PlanState:
+    from onechapter.reader.models import Plan, Reader
+
+    init_db()
+    if _is_conn(conn_or_reader_id) and book_id is not None:
+        r_id = reader_id_or_book_id
+        b_id = book_id
+    else:
+        r_id = conn_or_reader_id
+        b_id = reader_id_or_book_id
+
+    with transaction.atomic():
+        reader = Reader.objects.get(id=r_id)
+        today = today_in(reader.timezone, now)
+        Plan.objects.filter(
+            reader_id=r_id,
+            status__in=["active", "paused"],
+        ).exclude(book_id=b_id).update(status="idle", paused_on=None)
+
+        plan, _ = Plan.objects.update_or_create(
+            reader_id=r_id,
+            book_id=b_id,
+            defaults={
+                "status": "active",
+                "started_on": today,
+                "paused_on": None,
+            },
+        )
+    plan = get_plan(None, r_id, b_id)
+    return state_for_plan(None, plan, now)
+
+
+def pause_plan(conn_or_plan_id, plan_id: int | None = None, now: datetime | None = None) -> None:
+    from onechapter.reader.models import Plan
+
+    init_db()
+    p_id = plan_id if _is_conn(conn_or_plan_id) else conn_or_plan_id
+    plan = Plan.objects.select_related("reader").filter(id=p_id).first()
+    if not plan or plan.status != "active":
+        return
+    today = today_in(plan.reader.timezone, now)
+    plan.status = "paused"
+    plan.paused_on = today
+    plan.save(update_fields=["status", "paused_on"])
+
+
+def resume_plan(conn_or_plan_id, plan_id: int | None = None, now: datetime | None = None) -> None:
+    from onechapter.reader.models import Plan
+
+    init_db()
+    p_id = plan_id if _is_conn(conn_or_plan_id) else conn_or_plan_id
+    plan = Plan.objects.select_related("reader").filter(id=p_id).first()
+    if not plan or plan.status != "paused" or not plan.started_on or not plan.paused_on:
+        return
+    today = today_in(plan.reader.timezone, now)
+    started = plan.started_on if isinstance(plan.started_on, date) else date.fromisoformat(str(plan.started_on))
+    paused = plan.paused_on if isinstance(plan.paused_on, date) else date.fromisoformat(str(plan.paused_on))
     shift = (today - paused).days
     new_start = started.fromordinal(started.toordinal() + shift)
-    conn.execute(
-        "UPDATE plans SET status = 'active', started_on = ?, paused_on = NULL WHERE id = ?",
-        (new_start.isoformat(), plan_id),
-    )
+    plan.status = "active"
+    plan.started_on = new_start
+    plan.paused_on = None
+    plan.save(update_fields=["status", "started_on", "paused_on"])
 
 
-def chapter_views(conn: sqlite3.Connection, book_id: int, state: PlanState | None) -> list[ChapterView]:
+def chapter_views(conn_or_book_id, book_id_or_state, state_arg: PlanState | None = None) -> list[ChapterView]:
+    if _is_conn(conn_or_book_id):
+        b_id = book_id_or_state
+        state = state_arg
+    else:
+        b_id = conn_or_book_id
+        state = book_id_or_state
+
     unlocked = state.unlocked_through if state and state.status in {"active", "paused", "finished"} else -1
     if state and state.finished:
         unlocked = state.total - 1
     views = []
-    for row in list_chapters(conn, book_id):
+    for row in list_chapters(None, b_id):
         views.append(
             ChapterView(
-                position=row["position"],
-                title=row["title"],
-                part=row["part"],
-                body=row["body"],
-                word_count=row["word_count"],
-                unlocked=row["position"] <= unlocked,
+                position=row.position,
+                title=row.title,
+                part=row.part,
+                body=row.body,
+                word_count=row.word_count,
+                unlocked=row.position <= unlocked,
             )
         )
     return views
 
 
 def record_delivery(
-    conn: sqlite3.Connection, plan_id: int, local_date: str, position: int, channel: str
+    conn_or_plan_id,
+    plan_id_or_date,
+    local_date_or_pos,
+    position_or_channel,
+    channel: str | None = None,
 ) -> bool:
+    from onechapter.reader.models import Delivery
+
+    init_db()
+    if _is_conn(conn_or_plan_id) and channel is not None:
+        p_id = plan_id_or_date
+        loc_date = local_date_or_pos
+        pos = position_or_channel
+        chan = channel
+    else:
+        p_id = conn_or_plan_id
+        loc_date = plan_id_or_date
+        pos = local_date_or_pos
+        chan = position_or_channel
+
+    parsed_date = loc_date if isinstance(loc_date, date) else date.fromisoformat(str(loc_date))
     try:
-        conn.execute(
-            "INSERT INTO deliveries(plan_id, local_date, chapter_position, channel) VALUES (?, ?, ?, ?)",
-            (plan_id, local_date, position, channel),
-        )
+        with transaction.atomic():
+            Delivery.objects.create(
+                plan_id=p_id,
+                local_date=parsed_date,
+                chapter_position=int(pos),
+                channel=str(chan),
+            )
         return True
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         return False
 
 
-def already_delivered(conn: sqlite3.Connection, plan_id: int, local_date: str, channel: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM deliveries WHERE plan_id = ? AND local_date = ? AND channel = ?",
-        (plan_id, local_date, channel),
-    ).fetchone()
-    return bool(row)
+def already_delivered(
+    conn_or_plan_id,
+    plan_id_or_date,
+    local_date_or_channel,
+    channel: str | None = None,
+) -> bool:
+    from onechapter.reader.models import Delivery
+
+    init_db()
+    if _is_conn(conn_or_plan_id) and channel is not None:
+        p_id = plan_id_or_date
+        loc_date = local_date_or_channel
+        chan = channel
+    else:
+        p_id = conn_or_plan_id
+        loc_date = plan_id_or_date
+        chan = local_date_or_channel
+
+    parsed_date = loc_date if isinstance(loc_date, date) else date.fromisoformat(str(loc_date))
+    return Delivery.objects.filter(
+        plan_id=p_id,
+        local_date=parsed_date,
+        channel=str(chan),
+    ).exists()
 
 
-def add_reflection(conn: sqlite3.Connection, plan_id: int, position: int, body: str) -> None:
-    conn.execute(
-        "INSERT INTO reflections(plan_id, chapter_position, body) VALUES (?, ?, ?)",
-        (plan_id, position, body.strip()),
+def add_reflection(
+    conn_or_plan_id,
+    plan_id_or_pos: int,
+    position_or_body: int | str,
+    body: str | None = None,
+    *,
+    source_channel: str = "web",
+    kind: str = "text",
+    audio_s3_key: str | None = None,
+    audio_mime_type: str | None = None,
+    audio_duration_sec: int | None = None,
+    external_media_id: str | None = None,
+    transcript_text: str | None = None,
+):
+    from onechapter.reader.models import Chapter, Plan, Reflection
+
+    init_db()
+    if _is_conn(conn_or_plan_id) and body is not None:
+        p_id = plan_id_or_pos
+        pos = int(position_or_body)
+        text = body
+    else:
+        p_id = int(conn_or_plan_id)
+        pos = int(plan_id_or_pos)
+        text = str(position_or_body)
+
+    plan = Plan.objects.select_related("reader", "book").get(id=p_id)
+    chapter = Chapter.objects.filter(book_id=plan.book_id, position=pos).first()
+    chapter_key = chapter.chapter_key if chapter else f"pos-{pos}"
+    chapter_title = chapter.title if chapter else f"Day {pos + 1}"
+
+    return Reflection.objects.create(
+        reader=plan.reader,
+        book=plan.book,
+        plan=plan,
+        chapter=chapter,
+        chapter_key=chapter_key,
+        chapter_position_snapshot=pos,
+        chapter_title_snapshot=chapter_title,
+        kind=kind,
+        source_channel=source_channel,
+        body=text.strip(),
+        audio_s3_key=audio_s3_key,
+        audio_mime_type=audio_mime_type,
+        audio_duration_sec=audio_duration_sec,
+        external_media_id=external_media_id,
+        transcript_text=transcript_text,
     )
 
 
-def reflections_for(conn: sqlite3.Connection, plan_id: int, position: int) -> list[sqlite3.Row]:
-    return conn.execute(
-        "SELECT * FROM reflections WHERE plan_id = ? AND chapter_position = ? ORDER BY id",
-        (plan_id, position),
-    ).fetchall()
+def reflections_for(conn_or_plan_id, plan_id_or_pos: int, position: int | None = None):
+    """Return reflections for a reader's book chapter (matching by chapter or chapter_key so reprocess/re-reads survive)."""
+    from onechapter.reader.models import Chapter, Plan, Reflection
+
+    init_db()
+    if _is_conn(conn_or_plan_id) and position is not None:
+        p_id = plan_id_or_pos
+        pos = position
+    else:
+        p_id = conn_or_plan_id
+        pos = plan_id_or_pos
+
+    plan = Plan.objects.filter(id=p_id).first()
+    if not plan:
+        return []
+    chapter = Chapter.objects.filter(book_id=plan.book_id, position=pos).first()
+    if chapter:
+        return list(
+            Reflection.objects.filter(
+                reader_id=plan.reader_id,
+                book_id=plan.book_id,
+                chapter_key=chapter.chapter_key,
+            ).order_by("created_at")
+        )
+    return list(
+        Reflection.objects.filter(
+            reader_id=plan.reader_id,
+            book_id=plan.book_id,
+            chapter_position_snapshot=pos,
+        ).order_by("created_at")
+    )
 
 
-def bot_token(conn: sqlite3.Connection) -> str:
+def bot_token(conn=None) -> str:
     from onechapter.config import env_bot_token
     from onechapter.db import setting
 
-    return setting(conn, "telegram_bot_token", "") or env_bot_token()
+    return env_bot_token() or setting(None, "telegram_bot_token", "")
 
 
-def set_bot_token(conn: sqlite3.Connection, token: str) -> None:
+def set_bot_token(conn_or_token, token: str | None = None) -> None:
     from onechapter.db import set_setting
 
-    set_setting(conn, "telegram_bot_token", token.strip())
+    actual_token = token if _is_conn(conn_or_token) else conn_or_token
+    set_setting(None, "telegram_bot_token", (actual_token or "").strip())
 
 
 def estimate_days(word_count_value: int) -> str:

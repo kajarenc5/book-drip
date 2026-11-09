@@ -1,4 +1,7 @@
-from django.utils.deprecation import MiddlewareMixin
+import asyncio
+
+from asgiref.sync import sync_to_async
+from django.utils.decorators import sync_and_async_middleware
 
 from onechapter import config
 from onechapter.library import bootstrap
@@ -6,13 +9,26 @@ from onechapter.library import bootstrap
 _ready: set[str] = set()
 
 
-class BootstrapMiddleware(MiddlewareMixin):
-    """Create the reader database and built-in books on first use of a path."""
+def _ensure_bootstrapped() -> None:
+    key = str(config.DB_PATH)
+    if key in _ready:
+        return
+    bootstrap()
+    _ready.add(key)
 
-    def process_request(self, request):
-        key = str(config.DB_PATH)
-        if key in _ready:
-            return None
-        bootstrap()
-        _ready.add(key)
-        return None
+
+@sync_and_async_middleware
+def BootstrapMiddleware(get_response):
+    """Ensure migrations and built-in seed books exist before serving a request."""
+    if asyncio.iscoroutinefunction(get_response):
+        async def async_middleware(request):
+            await sync_to_async(_ensure_bootstrapped)()
+            return await get_response(request)
+
+        return async_middleware
+
+    def sync_middleware(request):
+        _ensure_bootstrapped()
+        return get_response(request)
+
+    return sync_middleware

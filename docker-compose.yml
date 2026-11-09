@@ -1,15 +1,43 @@
 services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-onechapter}
+      POSTGRES_USER: ${POSTGRES_USER:-onechapter}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-onechapter}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onechapter} -d ${POSTGRES_DB:-onechapter}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   onechapter:
     build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
-      - "43147:43147"
+      - "127.0.0.1:43147:43147"
     environment:
       ONECHAPTER_HOST: 0.0.0.0
       ONECHAPTER_PORT: 43147
+      DATABASE_URL: postgresql://${POSTGRES_USER:-onechapter}:${POSTGRES_PASSWORD:-onechapter}@db:5432/${POSTGRES_DB:-onechapter}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-onechapter-local-reader-key-change-if-you-expose-this}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       ONECHAPTER_TIMEZONE: ${ONECHAPTER_TIMEZONE:-Asia/Yerevan}
+      ONECHAPTER_S3_BUCKET: ${ONECHAPTER_S3_BUCKET:-}
+      ONECHAPTER_ACCESS_MODE: ${ONECHAPTER_ACCESS_MODE:-}
+      ONECHAPTER_ALLOWED_TELEGRAM_IDS: ${ONECHAPTER_ALLOWED_TELEGRAM_IDS:-}
+      ONECHAPTER_INVITE_CODE: ${ONECHAPTER_INVITE_CODE:-}
+      AWS_REGION: ${AWS_REGION:-eu-north-1}
     volumes:
       - onechapter-data:/app/data
 
 volumes:
+  postgres-data:
   onechapter-data:

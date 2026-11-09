@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 
+from asgiref.sync import sync_to_async
+
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "onechapter.project.settings")
 
 from django.core.asgi import get_asgi_application
@@ -11,22 +13,24 @@ log = logging.getLogger(__name__)
 django_application = get_asgi_application()
 
 
-async def _startup() -> None:
-    from onechapter.bot.runtime import runtime as telegram_runtime
-    from onechapter.db import db
+def _bootstrap_and_get_token() -> str:
     from onechapter.library import bootstrap, bot_token
 
     bootstrap()
-    token = ""
-    with db() as conn:
-        token = bot_token(conn)
+    return bot_token()
+
+
+async def _startup() -> None:
+    from onechapter.bot.runtime import runtime as telegram_runtime
+
+    token = await sync_to_async(_bootstrap_and_get_token)()
     if token:
         try:
             await telegram_runtime.start(token)
         except ValueError as exc:
             log.warning("Telegram bot did not start: %s", exc)
     else:
-        log.info("No TELEGRAM_BOT_TOKEN — web reader only; paste one on /settings to start")
+        log.info("No TELEGRAM_BOT_TOKEN — web reader only; configure TELEGRAM_BOT_TOKEN to start polling")
 
 
 async def _shutdown() -> None:

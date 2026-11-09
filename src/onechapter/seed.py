@@ -74,34 +74,27 @@ SLOW_READING = SplitResult(
 
 
 def seed_builtin_books(conn=None) -> None:
-    from onechapter.db import db as db_ctx
+    from onechapter.db import init_db
+    from onechapter.reader.models import Book
 
-    def _run(c) -> None:
-        if not c.execute("SELECT 1 FROM books WHERE slug = ?", ("slow-reading",)).fetchone():
-            upsert_book_from_split(
-                c,
-                SLOW_READING,
-                slug="slow-reading",
-                filename="builtin:slow-reading",
-                language="en",
-            )
-        prince_json = SEED_DIR / "the-prince.json"
-        if prince_json.exists() and not c.execute(
-            "SELECT 1 FROM books WHERE slug = ?", ("the-prince",)
-        ).fetchone():
-            upsert_book_from_split(
-                c,
-                load_split_json(prince_json),
-                slug="the-prince",
-                filename="gutenberg:1232",
-                language="en",
-            )
-
-    if conn is not None:
-        _run(conn)
-        return
-    with db_ctx() as c:
-        _run(c)
+    init_db()
+    if not Book.objects.filter(slug="slow-reading").exists():
+        upsert_book_from_split(
+            conn,
+            SLOW_READING,
+            slug="slow-reading",
+            filename="builtin:slow-reading",
+            language="en",
+        )
+    prince_json = SEED_DIR / "the-prince.json"
+    if prince_json.exists() and not Book.objects.filter(slug="the-prince").exists():
+        upsert_book_from_split(
+            conn,
+            load_split_json(prince_json),
+            slug="the-prince",
+            filename="gutenberg:1232",
+            language="en",
+        )
 
 
 def load_split_json(path: Path) -> SplitResult:
@@ -128,7 +121,6 @@ def parse_gutenberg_prince(text: str) -> SplitResult:
     start = text.find("To the Magnificent Lorenzo")
     if start < 0:
         raise ValueError("Could not find the Dedication in this Gutenberg text.")
-    # Walk back to include a Dedication heading if present.
     heading = text.rfind("DEDICATION", 0, start)
     if heading != -1 and start - heading < 80:
         start = heading
