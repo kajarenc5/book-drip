@@ -55,13 +55,26 @@ def split_extracted(book: ExtractedBook) -> SplitResult:
     return split_generic(book)
 
 
+def _match_section(
+    text: str, section: tarasov.KnownSection, cursor: int
+) -> re.Match[str] | None:
+    matches = [
+        m
+        for candidate in section.titles
+        if (m := title_regex(candidate).search(text, cursor)) is not None
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda m: (m.start(), -m.end()))
+
+
 def split_tarasov(book: ExtractedBook) -> SplitResult:
     text = paragraphize(book.text)
     found: list[tuple[int, int, tarasov.KnownSection]] = []
     cursor = 0
     skipped: list[str] = []
     for section in tarasov.SECTIONS:
-        match = title_regex(section.title).search(text, cursor)
+        match = _match_section(text, section, cursor)
         if not match:
             skipped.append(section.title)
             continue

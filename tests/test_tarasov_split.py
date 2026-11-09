@@ -128,3 +128,21 @@ def test_skips_missing_edition_title():
     titles = [ch.title for ch in result.chapters]
     assert "Поднебесная не стоит того" not in titles
     assert "Дели отряды для грабежа" in titles
+
+
+def test_handles_first_edition_title_variants_without_skipping_parts():
+    raw = (
+        _tarasov_text()
+        .replace("Выходи за пределы жизни", "Выходите за пределы жизни")
+        .replace("Большая цель достижима", "Большую цель можно достигнуть")
+        .replace("Наметь дату своей смерти", "Наметьте дату своей смерти")
+        .replace("Радость неудачи", "Радости неудачи")
+        .replace("За пределами жизни", "ЗАКЛЮЧЕНИЕ")
+    )
+    book = ExtractedBook(filename="vladimir_tarasov_tehnologiya_zhi.mobi", text=raw)
+    result = split_tarasov(book)
+    titles = [ch.title for ch in result.chapters]
+    assert "Радость неудачи" in titles
+    assert "Он придет и скажет" in titles
+    assert "За пределами жизни" in titles
+    assert len(result.chapters) >= 70
