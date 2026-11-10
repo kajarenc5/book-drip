@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -11,6 +12,7 @@ from onechapter.library import (
     active_plan_for_reader,
     already_delivered,
     chapter_count,
+    cleanup_staged_upload,
     get_book,
     get_chapter,
     get_or_create_telegram_reader,
@@ -25,8 +27,10 @@ from onechapter.library import (
     state_for_plan,
     update_reader,
 )
-from onechapter.reading import due_for_delivery
+from onechapter.reading import due_for_delivery, normalize_hhmm
 from onechapter.telegram_format import format_chapter_messages
+
+log = logging.getLogger(__name__)
 
 HELP = """One chapter a day. No more.
 
@@ -252,11 +256,12 @@ async def cmd_time(update, context) -> None:
     if not reader:
         return
     value = " ".join(context.args).strip() if context.args else ""
-    if not value:
+    normalized = normalize_hhmm(value)
+    if not normalized:
         await update.message.reply_text("Example: /time 08:00")
         return
-    await sync_to_async(update_reader)(None, reader.id, delivery_hhmm=value)
-    await update.message.reply_text(f"Daily delivery set to {value}.")
+    await sync_to_async(update_reader)(None, reader.id, delivery_hhmm=normalized)
+    await update.message.reply_text(f"Daily delivery set to {normalized}.")
 
 
 async def cmd_tz(update, context) -> None:
@@ -279,11 +284,14 @@ async def cmd_tz(update, context) -> None:
 @sync_to_async
 def _ingest_and_start_for_reader(name: str, data: bytes, reader):
     path = save_upload(name, data)
-    book = ingest_file(path, uploaded_by=reader, allow_replace=False)
-    start_book(None, reader.id, book["id"])
-    chapter = get_chapter(None, book["id"], 0)
-    first_title = chapter["title"] if chapter else "—"
-    return book, first_title
+    try:
+        book = ingest_file(path, uploaded_by=reader, allow_replace=False)
+        start_book(None, reader.id, book["id"])
+        chapter = get_chapter(None, book["id"], 0)
+        first_title = chapter["title"] if chapter else "—"
+        return book, first_title
+    finally:
+        cleanup_staged_upload(path)
 
 
 async def on_document(update, context) -> None:
@@ -380,28 +388,31 @@ def _collect_due_deliveries(now: datetime | None = None):
     plans = list_active_plans()
     due = []
     for plan in plans:
-        state = state_for_plan(None, plan, now)
-        if not due_for_delivery(state, now):
-            continue
-        if already_delivered(None, state.plan_id, state.today.isoformat(), "telegram"):
-            continue
-        position = state.today_position
-        if position is None:
-            continue
-        chapter = get_chapter(None, plan["book_id"], position)
-        if chapter is None:
-            continue
-        nxt = get_chapter(None, plan["book_id"], position + 1)
-        messages = format_chapter_messages(
-            day=position + 1,
-            total=state.total,
-            title=chapter["title"],
-            part=chapter["part"],
-            body=chapter["body"],
-            next_title=nxt["title"] if nxt else None,
-            book_title=plan["book_title"],
-        )
-        due.append((plan["telegram_id"], state, messages, position))
+        try:
+            state = state_for_plan(None, plan, now)
+            if not due_for_delivery(state, now):
+                continue
+            if already_delivered(None, state.plan_id, state.today.isoformat(), "telegram"):
+                continue
+            position = state.today_position
+            if position is None:
+                continue
+            chapter = get_chapter(None, plan["book_id"], position)
+            if chapter is None:
+                continue
+            nxt = get_chapter(None, plan["book_id"], position + 1)
+            messages = format_chapter_messages(
+                day=position + 1,
+                total=state.total,
+                title=chapter["title"],
+                part=chapter["part"],
+                body=chapter["body"],
+                next_title=nxt["title"] if nxt else None,
+                book_title=plan["book_title"],
+            )
+            due.append((plan["telegram_id"], state, messages, position))
+        except Exception:
+            log.exception("Failed to prepare due delivery for plan %s", getattr(plan, "id", None))
     return due
 
 
@@ -409,14 +420,22 @@ async def send_due_chapters(bot, now: datetime | None = None) -> int:
     due = await _collect_due_deliveries(now)
     sent = 0
     for telegram_id, state, messages, position in due:
-        for text in messages:
-            await bot.send_message(chat_id=telegram_id, text=text, parse_mode="HTML")
-        await sync_to_async(record_delivery)(
-            None,
-            state.plan_id,
-            state.today.isoformat(),
-            position,
-            "telegram",
-        )
-        sent += 1
+        try:
+            for text in messages:
+                await bot.send_message(chat_id=telegram_id, text=text, parse_mode="HTML")
+            await sync_to_async(record_delivery)(
+                None,
+                state.plan_id,
+                state.today.isoformat(),
+                position,
+                "telegram",
+            )
+            sent += 1
+        except Exception:
+            log.warning(
+                "Could not deliver chapter to telegram_id=%s (plan=%s)",
+                telegram_id,
+                state.plan_id,
+                exc_info=True,
+            )
     return sent

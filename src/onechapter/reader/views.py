@@ -11,11 +11,13 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 
 from onechapter.auth import verify_magic_login_token, verify_telegram_login_data
 from onechapter.bot.runtime import runtime as telegram_runtime
+from onechapter.config import env_bot_username
 from onechapter.library import (
     active_plan_for_reader,
     add_reflection,
     bot_token,
     chapter_views,
+    cleanup_staged_upload,
     get_book,
     get_chapter,
     get_or_create_telegram_reader,
@@ -69,12 +71,15 @@ def _require_reader_or_redirect(request):
 
 @require_GET
 def login_page(request):
+    invite = request.GET.get("invite", "").strip()
+    if invite:
+        request.session["pending_invite_code"] = invite
     snap = telegram_runtime.snapshot()
     return render(
         request,
         "login.html",
         {
-            "bot_username": snap["username"],
+            "bot_username": snap["username"] or env_bot_username() or None,
             "notice": request.GET.get("notice"),
         },
     )
@@ -92,11 +97,13 @@ def telegram_auth(request):
     last = verified.get("last_name", "")
     full_name = f"{first} {last}".strip() or verified.get("username", "")
     handle = verified.get("username", "")
+    invite = request.session.pop("pending_invite_code", None)
     reader = get_or_create_telegram_reader(
         None,
         tg_id,
         full_name or None,
         handle=handle or None,
+        invite_code=invite,
     )
     if not reader.is_allowed:
         return SeeOther("/login?notice=invite_only")
@@ -293,6 +300,8 @@ def upload(request):
     except Exception:
         log.exception("Ingest failed")
         return SeeOther("/library?notice=fail")
+    finally:
+        cleanup_staged_upload(path)
 
 
 @sync_to_async

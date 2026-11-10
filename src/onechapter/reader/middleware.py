@@ -3,14 +3,14 @@ import asyncio
 from asgiref.sync import sync_to_async
 from django.utils.decorators import sync_and_async_middleware
 
-from onechapter import config
+from onechapter.db import sync_sqlite_db_path
 from onechapter.library import bootstrap
 
 _ready: set[str] = set()
 
 
 def _ensure_bootstrapped() -> None:
-    key = str(config.DB_PATH)
+    key = sync_sqlite_db_path()
     if key in _ready:
         return
     bootstrap()

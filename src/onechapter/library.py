@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import shutil
 import uuid
 from datetime import date, datetime
 from pathlib import Path
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
-from django.db.models import Case, Count, IntegerField, Sum, Value, When
+from django.db.models import Case, Count, IntegerField, Q, Sum, Value, When
 from django.db.models.functions import Coalesce
 
 from onechapter import config, storage
@@ -15,7 +16,14 @@ from onechapter.db import init_db
 from onechapter.ingest.extract import extract_path
 from onechapter.ingest.split import ChapterDraft, SplitResult, split_extracted
 from onechapter.ingest.textutil import slugify
-from onechapter.reading import ChapterView, PlanState, plan_state, today_in
+from onechapter.reading import (
+    ChapterView,
+    PlanState,
+    is_valid_timezone,
+    normalize_hhmm,
+    plan_state,
+    today_in,
+)
 
 
 def _is_conn(obj) -> bool:
@@ -122,6 +130,8 @@ def upsert_book_from_split(
 
     init_db()
     split: SplitResult = split_arg if _is_conn(conn_or_split) else conn_or_split  # type: ignore[assignment]
+    source_sha256 = source_sha256 or None
+    s3_key = s3_key or None
 
     if source_sha256 and not allow_replace:
         by_hash = Book.objects.filter(source_sha256=source_sha256).first()
@@ -219,9 +229,9 @@ def _replace_book_in_place(
     if language is not None:
         book.language = language
     if source_sha256 is not None:
-        book.source_sha256 = source_sha256
+        book.source_sha256 = source_sha256 or None
     if s3_key is not None:
-        book.s3_key = s3_key
+        book.s3_key = s3_key or None
     book.save()
 
     existing_chapters = list(Chapter.objects.filter(book=book))
@@ -231,15 +241,17 @@ def _replace_book_in_place(
         if ch.content_sha256:
             by_hash.setdefault(ch.content_sha256, []).append(ch)
 
-    # Shift existing positions out of 0..N-1 range inside the transaction to avoid
-    # temporary unique constraint collisions when reordering chapters.
+    # Shift existing positions and chapter_keys out of the target range inside the
+    # transaction to avoid temporary unique constraint collisions when reordering or renaming.
     for idx, ch in enumerate(existing_chapters):
         ch.position = 100_000 + idx
-        ch.save(update_fields=["position"])
+        ch.chapter_key = f"__tmp_{ch.id}_{idx}"
+        ch.save(update_fields=["position", "chapter_key"])
 
     keyed = compute_chapter_keys(split.chapters)
     kept_ids: set[int] = set()
     final_chapters_by_key: dict[str, Chapter] = {}
+    final_chapters_by_id: dict[int, Chapter] = {}
 
     for draft, chapter_key, content_hash in keyed:
         matched = by_key.get(chapter_key)
@@ -258,6 +270,7 @@ def _replace_book_in_place(
             matched.save()
             kept_ids.add(matched.id)
             final_chapters_by_key[chapter_key] = matched
+            final_chapters_by_id[matched.id] = matched
         else:
             created = Chapter.objects.create(
                 book=book,
@@ -271,13 +284,20 @@ def _replace_book_in_place(
             )
             kept_ids.add(created.id)
             final_chapters_by_key[chapter_key] = created
+            final_chapters_by_id[created.id] = created
 
     # Remove chapters that no longer exist in the split; Reflection.chapter uses
     # ON DELETE SET NULL so reflections remain intact with their snapshots.
     Chapter.objects.filter(book=book).exclude(id__in=kept_ids).delete()
 
-    # Re-anchor any reflections for this book by chapter_key.
+    # Re-anchor any reflections for this book by surviving Chapter ID or chapter_key.
     for ref in Reflection.objects.filter(book=book):
+        surviving_ch = final_chapters_by_id.get(ref.chapter_id) if ref.chapter_id else None
+        if surviving_ch is not None:
+            if ref.chapter_key != surviving_ch.chapter_key:
+                ref.chapter_key = surviving_ch.chapter_key
+                ref.save(update_fields=["chapter_key"])
+            continue
         target_ch = final_chapters_by_key.get(ref.chapter_key)
         if target_ch is not None and ref.chapter_id != target_ch.id:
             ref.chapter = target_ch
@@ -345,10 +365,20 @@ def reprocess_book(slug: str, *, s3_client=None):
     key = book.s3_key or book.source_filename
     local_path, should_cleanup = storage.fetch_original_to_temp(key, s3_client=s3_client)
     try:
-        return ingest_file(
-            local_path,
+        extracted = extract_path(local_path)
+        split = split_extracted(extracted)
+        if not split.chapters:
+            raise ValueError("No chapters found in that file.")
+        language = book.language or ("ru" if split.profile == "tarasov" else None)
+        return upsert_book_from_split(
+            None,
+            split,
+            slug=book.slug,
+            filename=book.source_filename,
+            language=language,
+            source_sha256=book.source_sha256,
+            s3_key=book.s3_key,
             allow_replace=True,
-            s3_client=s3_client,
         )
     finally:
         if should_cleanup and local_path.exists():
@@ -358,9 +388,22 @@ def reprocess_book(slug: str, *, s3_client=None):
 def save_upload(filename: str, data: bytes) -> Path:
     ensure_dirs()
     safe = storage.safe_filename(filename)
-    dest = config.UPLOAD_DIR / safe
+    stage_dir = config.DATA_DIR / "tmp" / f"upload-{uuid.uuid4().hex}"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    dest = stage_dir / safe
     dest.write_bytes(data)
     return dest
+
+
+def cleanup_staged_upload(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink(missing_ok=True)
+        parent = path.parent
+        if parent.name.startswith("upload-") and parent.exists():
+            shutil.rmtree(parent, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def _ensure_django_user( reader, username_hint: str | None = None):
@@ -434,15 +477,21 @@ def get_or_create_channel_reader(
 
     with transaction.atomic():
         # If there is a single initial local Reader with no identity on this channel yet,
-        # and no other identities exist for this channel, unify them into the same Reader!
-        existing_channel_count = ChannelIdentity.objects.filter(channel=channel).count()
+        # and no other allowed identities exist for this channel, unify them into the same Reader!
+        existing_channel_count = ChannelIdentity.objects.filter(
+            channel=channel,
+            reader__is_allowed=True,
+        ).count()
         unlinked_reader = (
-            Reader.objects.exclude(channels__channel=channel).order_by("id").first()
+            Reader.objects.filter(is_allowed=True)
+            .exclude(channels__channel=channel)
+            .order_by("id")
+            .first()
             if existing_channel_count == 0
             else None
         )
         has_explicit_gate = bool(config.allowed_telegram_ids() or config.invite_code())
-        is_first_reader = not Reader.objects.exists() and not (
+        is_first_reader = not Reader.objects.filter(is_allowed=True).exists() and not (
             config.access_mode() == "invite" and has_explicit_gate
         )
         is_allowed = allowed_now or is_first_reader
@@ -525,10 +574,12 @@ def update_reader(
     reader = Reader.objects.filter(id=actual_id).first()
     if not reader:
         return
-    if timezone:
-        reader.timezone = timezone
+    if timezone and is_valid_timezone(timezone):
+        reader.timezone = timezone.strip()
     if delivery_hhmm:
-        reader.delivery_hhmm = delivery_hhmm
+        normalized = normalize_hhmm(delivery_hhmm)
+        if normalized:
+            reader.delivery_hhmm = normalized
     if name is not None:
         reader.display_name = name
     reader.save()
@@ -843,8 +894,9 @@ def reflections_for(conn_or_plan_id, plan_id_or_pos: int, position: int | None =
             Reflection.objects.filter(
                 reader_id=plan.reader_id,
                 book_id=plan.book_id,
-                chapter_key=chapter.chapter_key,
-            ).order_by("created_at")
+            )
+            .filter(Q(chapter=chapter) | Q(chapter_key=chapter.chapter_key))
+            .order_by("created_at")
         )
     return list(
         Reflection.objects.filter(

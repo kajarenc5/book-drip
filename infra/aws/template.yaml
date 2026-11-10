@@ -255,7 +255,7 @@ Resources:
           dnf update -y
           dnf install -y docker git
           mkdir -p /usr/local/lib/docker/cli-plugins
-          curl -SL "https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-aarch64" \
+          curl --retry 5 --retry-delay 3 -fsSL "https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-aarch64" \
             -o /usr/local/lib/docker/cli-plugins/docker-compose
           chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
           systemctl enable --now docker

@@ -118,3 +118,7 @@ def test_docker_compose_and_site_configs_are_valid():
     wrangler = json.loads(wrangler_clean)
     assert wrangler["name"] == "onechapter-landing"
     assert (ROOT / "site" / "index.html").exists()
+
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "postgresql-client-17" in dockerfile
+    assert "ghcr.io/astral-sh/uv:0.11.1" in dockerfile

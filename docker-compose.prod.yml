@@ -16,7 +16,8 @@ services:
     environment:
       DJANGO_DEBUG: "0"
       ONECHAPTER_ACCESS_MODE: ${ONECHAPTER_ACCESS_MODE:-invite}
-      ONECHAPTER_PUBLIC_URL: https://app.onechapter.am
+      ONECHAPTER_REQUIRE_WEB_LOGIN: ${ONECHAPTER_REQUIRE_WEB_LOGIN:-1}
+      ONECHAPTER_PUBLIC_URL: ${ONECHAPTER_PUBLIC_URL:-https://app.onechapter.am}
 
   db-backup:
     build: .

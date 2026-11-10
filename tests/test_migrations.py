@@ -75,17 +75,22 @@ def test_unified_identity_merges_web_and_telegram_and_supports_future_channels(d
 
 def test_invite_only_access_control_and_invite_codes(data_dir, monkeypatch):
     init_db()
-    # Create initial operator reader first
-    operator = get_or_create_telegram_reader(None, 10001, "Operator")
-    assert operator.is_allowed is True
-
     monkeypatch.setenv("ONECHAPTER_ACCESS_MODE", "invite")
     monkeypatch.setenv("ONECHAPTER_ALLOWED_TELEGRAM_IDS", "10001,20002")
     monkeypatch.setenv("ONECHAPTER_INVITE_CODE", "slowread2026")
 
-    # Uninvited stranger is created with is_allowed=False
+    # Initial local reader exists before any Telegram user connects
+    local_op = get_or_create_local_reader()
+
+    # Uninvited stranger connects first and is created with is_allowed=False
     stranger = get_or_create_telegram_reader(None, 99999, "Stranger")
     assert stranger.is_allowed is False
+    assert stranger.id != local_op.id
+
+    # Operator connects AFTER the rejected stranger and still unifies into local_op!
+    operator = get_or_create_telegram_reader(None, 10001, "Operator")
+    assert operator.is_allowed is True
+    assert operator.id == local_op.id
 
     # Allowlisted Telegram ID is allowed immediately
     allowlisted = get_or_create_telegram_reader(None, 20002, "Friend")
@@ -220,12 +225,42 @@ def test_reflections_survive_operator_reprocess_when_chapter_positions_shift(dat
     assert monkey_notes[1].kind == "audio"
     assert monkey_notes[1].audio_s3_key.endswith("/sample.ogg")
 
+    # Reprocess again where "The Monkey Feeder" title is renamed (chapter_key changes)
+    # while body content_sha256 stays identical -> matched by content_sha256 and reflection survives!
+    renamed_split = SplitResult(
+        title="Book of Essays",
+        author="Author",
+        profile="generic",
+        chapters=[
+            ChapterDraft(index=0, title="Preface to the Second Edition", body="New preface text.", part="Preface"),
+            ChapterDraft(
+                index=1,
+                title="Three in the Morning, Four in the Evening",
+                body="Monkeys and chestnuts (revised).",
+                part="Part I",
+            ),
+            ChapterDraft(index=2, title="Horizontal Career", body="Grow where you stand.", part="Part I"),
+        ],
+    )
+    upsert_book_from_split(
+        None,
+        renamed_split,
+        slug="book-of-essays",
+        filename="essays.epub",
+        allow_replace=True,
+    )
+    ch1_renamed = get_chapter(None, book.id, 1)
+    assert ch1_renamed.id == ch0_before.id
+    renamed_notes = reflections_for(None, state.plan_id, 1)
+    assert len(renamed_notes) == 2
+
 
 def test_s3_storage_and_operator_reprocess_roundtrip(data_dir, tmp_path, monkeypatch):
     init_db()
     monkeypatch.setenv("ONECHAPTER_S3_BUCKET", "onechapter-test-bucket")
 
     objects: dict[tuple[str, str], bytes] = {}
+    put_calls: list[str] = []
 
     class FakeS3Body:
         def __init__(self, raw: bytes):
@@ -238,6 +273,7 @@ def test_s3_storage_and_operator_reprocess_roundtrip(data_dir, tmp_path, monkeyp
         def put_object(self, *, Bucket, Key, Body, ServerSideEncryption):
             assert ServerSideEncryption == "AES256"
             objects[(Bucket, Key)] = Body
+            put_calls.append(Key)
 
         def get_object(self, *, Bucket, Key):
             return {"Body": FakeS3Body(objects[(Bucket, Key)])}
@@ -257,19 +293,37 @@ def test_s3_storage_and_operator_reprocess_roundtrip(data_dir, tmp_path, monkeyp
     expected_key = f"originals/{expected_sha}/sample.txt"
     assert book.source_sha256 == expected_sha
     assert book.s3_key == expected_key
+    assert book.source_filename == "sample.txt"
     assert ("onechapter-test-bucket", expected_key) in objects
+    assert put_calls == [expected_key]
 
-    # Delete local file and verify operator reprocess fetches from S3 and updates in place
+    # Delete local file and verify operator reprocess fetches from S3, updates in place,
+    # and preserves s3_key and source_filename without re-uploading a temp file to S3!
     sample.unlink()
     reprocessed = reprocess_book(book.slug, s3_client=fake_s3)
     assert reprocessed.id == book.id
     assert reprocessed.chapter_count == 2
+    assert reprocessed.s3_key == expected_key
+    assert reprocessed.source_filename == "sample.txt"
+    assert put_calls == [expected_key]
 
 
 def test_telegram_login_widget_and_magic_link_auth(data_dir, monkeypatch):
     init_db()
     bot_token = "123456789:ABCDEF_test_secret_bot_token"
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", bot_token)
+    monkeypatch.setenv("ONECHAPTER_ACCESS_MODE", "invite")
+    monkeypatch.setenv("ONECHAPTER_ALLOWED_TELEGRAM_IDS", "555123")
+    monkeypatch.setenv("ONECHAPTER_INVITE_CODE", "webinvite2026")
+
+    # Production default (DJANGO_DEBUG=0) enforces web login
+    monkeypatch.setenv("DJANGO_DEBUG", "0")
+    assert config.require_web_login() is True
+
+    unauth_client = Client()
+    redirect_resp = unauth_client.get("/")
+    assert redirect_resp.status_code == 302
+    assert redirect_resp.headers["location"] == "/login"
 
     reader = get_or_create_telegram_reader(None, 555123, "Tigran")
     magic = create_magic_login_token(reader.id, 555123)
@@ -282,12 +336,12 @@ def test_telegram_login_widget_and_magic_link_auth(data_dir, monkeypatch):
     assert resp.status_code == 303
     assert resp.headers["location"] == "/"
 
-    # Test Telegram Login Widget HMAC-SHA256 verification
+    # Test Telegram Login Widget HMAC-SHA256 verification and web invite redemption (/login?invite=...)
     now_ts = int(time.time())
     widget_data = {
-        "id": "555123",
-        "first_name": "Tigran",
-        "username": "tigran_r",
+        "id": "888999",
+        "first_name": "Ani",
+        "username": "ani_r",
         "auth_date": str(now_ts),
     }
     check_str = "\n".join(f"{k}={v}" for k, v in sorted(widget_data.items()))
@@ -297,3 +351,11 @@ def test_telegram_login_widget_and_magic_link_auth(data_dir, monkeypatch):
     assert verify_telegram_login_data(widget_data, bot_token, now=now_ts) is not None
     tampered = dict(widget_data, first_name="Mallory")
     assert verify_telegram_login_data(tampered, bot_token, now=now_ts) is None
+
+    invite_client = Client()
+    invite_client.get("/login?invite=inv_webinvite2026")
+    tg_resp = invite_client.get("/auth/telegram", data=widget_data)
+    assert tg_resp.status_code == 303
+    assert tg_resp.headers["location"] == "/"
+    ani_reader = Reader.objects.filter(channels__channel="telegram", channels__external_id="888999").first()
+    assert ani_reader is not None and ani_reader.is_allowed is True

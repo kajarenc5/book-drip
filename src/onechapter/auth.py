@@ -80,4 +80,4 @@ def verify_telegram_login_data(
 
     if not hmac.compare_digest(expected_hash, received_hash):
         return None
-    return dict(params)
+    return {k: str(v) for k, v in params.items() if v is not None}

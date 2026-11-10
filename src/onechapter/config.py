@@ -33,6 +33,10 @@ def env_bot_token() -> str:
     return os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 
+def env_bot_username() -> str:
+    return os.environ.get("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+
+
 def s3_bucket() -> str:
     return os.environ.get("ONECHAPTER_S3_BUCKET", "").strip()
 
@@ -64,7 +68,18 @@ def invite_code() -> str:
 
 
 def require_web_login() -> bool:
-    return os.environ.get("ONECHAPTER_REQUIRE_WEB_LOGIN", "0").strip() in {"1", "true", "yes"}
+    """Return True when web visitors must authenticate instead of sharing the local reader.
+
+    Defaults to True when DJANGO_DEBUG=0 (production) and False in local
+    development/tests unless ONECHAPTER_REQUIRE_WEB_LOGIN is explicitly set.
+    """
+    explicit = os.environ.get("ONECHAPTER_REQUIRE_WEB_LOGIN", "").strip().lower()
+    if explicit in {"1", "true", "yes"}:
+        return True
+    if explicit in {"0", "false", "no"}:
+        return False
+    debug = os.environ.get("DJANGO_DEBUG", "1") != "0"
+    return not debug
 
 
 def is_access_allowed(

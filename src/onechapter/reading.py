@@ -51,14 +51,44 @@ def parse_date(value: str | date | None) -> date | None:
     return date.fromisoformat(str(value))
 
 
+def is_valid_timezone(tz_name: str) -> bool:
+    if not tz_name or not tz_name.strip():
+        return False
+    try:
+        ZoneInfo(tz_name.strip())
+        return True
+    except Exception:
+        return False
+
+
+def _safe_zoneinfo(tz_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo((tz_name or DEFAULT_TIMEZONE).strip())
+    except Exception:
+        return ZoneInfo(DEFAULT_TIMEZONE)
+
+
+def normalize_hhmm(value: str) -> str | None:
+    if not value:
+        return None
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
+    if not match:
+        return None
+    hh = int(match.group(1))
+    mm = int(match.group(2))
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    return f"{hh:02d}:{mm:02d}"
+
+
 def today_in(tz_name: str, now: datetime | None = None) -> date:
-    tz = ZoneInfo(tz_name)
+    tz = _safe_zoneinfo(tz_name)
     current = now.astimezone(tz) if now else datetime.now(tz)
     return current.date()
 
 
 def local_now(tz_name: str, now: datetime | None = None) -> datetime:
-    tz = ZoneInfo(tz_name)
+    tz = _safe_zoneinfo(tz_name)
     return now.astimezone(tz) if now else datetime.now(tz)
 
 
