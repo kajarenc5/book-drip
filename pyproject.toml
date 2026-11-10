@@ -7,14 +7,17 @@ requires-python = ">=3.12"
 dependencies = [
     "apscheduler>=3.10",
     "beautifulsoup4>=4.12",
+    "boto3>=1.35",
     "django>=5.2.19,<5.3",
     "ebooklib>=0.18",
     "html2text>=2024.2",
     "lxml>=5.3",
     "mobi>=0.3.3",
+    "psycopg[binary]>=3.2",
     "python-dotenv>=1.0",
     "python-telegram-bot>=21.6",
     "uvicorn[standard]>=0.32",
+    "whitenoise>=6.8",
 ]
 
 [project.scripts]

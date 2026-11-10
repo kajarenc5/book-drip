@@ -10,6 +10,7 @@ from onechapter.bot.handlers import (
     cmd_begin,
     cmd_books,
     cmd_help,
+    cmd_login,
     cmd_pause,
     cmd_progress,
     cmd_read,
@@ -27,9 +28,18 @@ log = logging.getLogger(__name__)
 
 
 def build_application(token: str) -> Application:
-    app = Application.builder().token(token).build()
+    app = (
+        Application.builder()
+        .token(token)
+        .connect_timeout(15.0)
+        .read_timeout(15.0)
+        .write_timeout(15.0)
+        .get_updates_connect_timeout(15.0)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("yesterday", cmd_yesterday))
     app.add_handler(CommandHandler("progress", cmd_progress))
