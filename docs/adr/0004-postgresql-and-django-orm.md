@@ -14,10 +14,11 @@ Two critical problems surfaced during architecture review:
 
 ## Decision
 
-1. **Use Django 5.2 ORM and Migrations from Day 1:**
-   - Replace the custom `src/onechapter/db.py` SQL layer and `:memory:` placeholder with real Django models (`django.db.models`) and standard Django migrations (`python manage.py migrate`).
-   - Configure `DATABASES["default"]` via `DATABASE_URL` (using `psycopg` v3) with persistent connections (`CONN_MAX_AGE = 60`), eliminating per-query connection overhead.
-   - Seeded public-domain books (`data/seed/`) are loaded idempotently via a Django management command (`python manage.py seed_books`) on startup/deploy.
+1. **Use Django 5.2 ORM and Migrations with PostgreSQL 17 Everywhere:**
+   - Replace the custom `src/onechapter/db.py` SQL layer and SQLite fallback with real Django models (`django.db.models`), standard Django migrations (`python manage.py migrate`), and **PostgreSQL 17 as the sole database engine across local development, tests, and production**.
+   - In local development and `pytest` (when `DATABASE_URL` is unset), `onechapter` automatically initializes and manages a local PostgreSQL 17 instance in `data/postgres/` (`127.0.0.1:54329`, manageable via `onechapter db {start,stop,status,psql,reset}`).
+   - Configure `DATABASES["default"]` using `psycopg` v3 with persistent connections (`CONN_MAX_AGE = 60`), eliminating per-query connection overhead and any SQLite-vs-PostgreSQL dialect drift.
+   - Seeded public-domain books (`data/seed/`) are loaded idempotently on startup/deploy.
 
 2. **Run PostgreSQL 17 in Docker on the same EC2 instance, backed up to S3:**
    - Run `postgres:17-alpine` in `docker-compose.yml` on the same Graviton EC2 instance as the app ([ADR 0003](0003-one-app-server.md)).

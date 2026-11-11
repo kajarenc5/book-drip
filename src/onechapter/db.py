@@ -1,37 +1,44 @@
 from __future__ import annotations
 
 import json
-import os
 from contextlib import contextmanager
 
 from django.conf import settings
 from django.core.management import call_command
 from django.db import connections
 
-from onechapter import config
-from onechapter.config import ensure_dirs
+from onechapter.config import database_config, ensure_dirs
+from onechapter.local_pg import ensure_local_postgres, is_using_managed_local_pg
 
 _migrated_targets: set[str] = set()
 
 
-def sync_sqlite_db_path() -> str:
-    """Keep Django's default SQLite path aligned with config.DB_PATH when DATABASE_URL is unset."""
+def current_db_target() -> str:
+    """Sync Django's default database settings with environment overrides and return a target key."""
     ensure_dirs()
+    desired = database_config()
     db_cfg = settings.DATABASES["default"]
-    if not os.environ.get("DATABASE_URL", "").strip() and db_cfg.get("ENGINE") == "django.db.backends.sqlite3":
-        target = str(config.DB_PATH)
-        conn = connections["default"]
-        if str(conn.settings_dict.get("NAME")) != target:
-            conn.close()
-            db_cfg["NAME"] = target
-            conn.settings_dict["NAME"] = target
-        return target
-    return str(db_cfg.get("NAME") or "default")
+    conn = connections["default"]
+
+    changed = any(
+        str(db_cfg.get(k)) != str(desired.get(k))
+        for k in ("ENGINE", "NAME", "USER", "PASSWORD", "HOST", "PORT")
+    )
+    if changed:
+        conn.close()
+        for k, v in desired.items():
+            db_cfg[k] = v
+            conn.settings_dict[k] = v
+
+    if is_using_managed_local_pg():
+        ensure_local_postgres(str(db_cfg["NAME"]))
+
+    return f"{db_cfg.get('HOST')}:{db_cfg.get('PORT')}/{db_cfg.get('NAME')}"
 
 
 def init_db() -> None:
-    """Apply Django migrations for the configured database if not yet migrated in this process."""
-    target = sync_sqlite_db_path()
+    """Ensure PostgreSQL is running and apply Django migrations if not yet migrated in this process."""
+    target = current_db_target()
     if target in _migrated_targets and _has_core_tables():
         return
     call_command("migrate", verbosity=0, interactive=False)
@@ -48,7 +55,7 @@ def _has_core_tables() -> bool:
 
 @contextmanager
 def db():
-    """Compatibility context manager that ensures the Django database is initialized."""
+    """Compatibility context manager that ensures the PostgreSQL database is initialized."""
     init_db()
     yield connections["default"]
 

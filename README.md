@@ -16,12 +16,22 @@ Tarasov’s book is a sequence of parables. Reading three in a row is easy; reme
 
 ## Run it
 
-You need Python 3.12+ and [uv](https://docs.astral.sh/uv/). The web reader is Django 5.2, the current long-term support release.
+You need Python 3.12+, PostgreSQL 17 (`brew install postgresql@17`), and [uv](https://docs.astral.sh/uv/). The web reader is Django 5.2, the current long-term support release, backed exclusively by PostgreSQL 17 in both local development and production.
 
 ```bash
 cp .env.example .env
 uv sync
 uv run onechapter serve
+```
+
+When `DATABASE_URL` is unset, `onechapter` automatically initializes and starts a local PostgreSQL 17 instance in `data/postgres/` (`127.0.0.1:54329`). You can also manage or inspect the local database directly:
+
+```bash
+uv run onechapter db status   # show instance status & connection URL
+uv run onechapter db start    # ensure local Postgres 17 is running & migrated
+uv run onechapter db psql     # open an interactive psql shell
+uv run onechapter db reset    # drop, recreate, migrate, and re-seed local DB
+uv run onechapter db stop     # stop the local Postgres 17 instance
 ```
 
 Open [http://127.0.0.1:43147](http://127.0.0.1:43147).
@@ -78,7 +88,7 @@ src/onechapter/
   reading.py  calendar math (one unlock per local day)
 ```
 
-Data lives in `data/` (`app.db`, uploads). It is gitignored.
+Data lives in `data/` (`postgres/`, `uploads/`). It is gitignored.
 
 ## Tests
 

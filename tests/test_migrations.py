@@ -31,8 +31,9 @@ from onechapter.library import (
 from onechapter.reader.models import Book, ChannelIdentity, Chapter, Reader, Reflection
 
 
-def test_django_migrations_create_all_domain_tables(data_dir):
+def test_django_migrations_create_all_domain_tables(data_dir, monkeypatch):
     init_db()
+    assert connections["default"].vendor == "postgresql"
     tables = set(connections["default"].introspection.table_names())
     assert {
         "books",
@@ -44,6 +45,14 @@ def test_django_migrations_create_all_domain_tables(data_dir):
         "reflections",
         "settings",
     } <= tables
+
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///not-supported.db")
+    try:
+        config.database_config()
+    except ValueError as exc:
+        assert "PostgreSQL exclusively" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for non-PostgreSQL DATABASE_URL")
 
 
 def test_second_startup_keeps_settings_and_rows(data_dir):
