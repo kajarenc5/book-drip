@@ -9,6 +9,8 @@ data/postgres/
 data/uploads/
 data/tmp/
 staticfiles/
+site/node_modules/
+site/.wrangler/
 .worktrees/
 *.log
 .DS_Store

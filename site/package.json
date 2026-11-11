@@ -1,0 +1,15 @@
+{
+  "name": "onechapter-landing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Public static landing site for onechapter.am on Cloudflare Workers Static Assets",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4.45.0"
+  }
+}
