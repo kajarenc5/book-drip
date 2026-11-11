@@ -47,7 +47,7 @@ Where this guidance conflicts with the project's own instructions, the project's
 
 ### Help level
 
-- Current saved setting: `help_level: HIGH`
+- Current saved setting: `help_level: MEDIUM`
 - help_level (required): LOW, MEDIUM, or HIGH. While a user is building, you MUST ask the user: "How much guidance would you like from me? Low (I only flag security risks), medium (I ask a couple of clarifying questions if something seems off), or high (I explain what I'm doing, suggest alternatives, and flag best practices)."
 
 You CAN update this rule file to save a user's help_level.
@@ -107,7 +107,7 @@ Constraints for each level:
 
 ## Workflow Reminders Before AWS Work
 
-- The user's saved guidance preference is `help_level: HIGH` (explain what each step does and why, suggest alternatives when a better approach exists, flag best practices and trade-offs, and still execute the user's choice if they disagree).
+- The user's saved guidance preference is `help_level: MEDIUM` (ask up to two clarifying questions if the request has an ambiguity or potential issue, and execute directly without unnecessary explanations unless asked).
 - Ask before leaving newly created AWS resources in the project so the user can choose to delete them or keep them.
 
 ## Target Architecture & Key Decisions (`docs/architecture/` & `docs/adr/`)

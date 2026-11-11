@@ -1,9 +1,22 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  One Chapter (onechapter.am) infrastructure in eu-north-1:
-  Private S3 Standard bucket (originals/, backups/postgres/, media/reflections/),
-  Graviton EC2 instance running Docker Compose (Caddy, Django/Bot, PostgreSQL 17, S3 Backup),
-  Cloudflare-only HTTPS Security Group, and SSM Session Manager IAM Role.
+Description: >-
+  One Chapter web reader and daily chapter bot — single Graviton EC2 Docker Compose
+  host behind Cloudflare with private S3 Standard storage and SSM Session Manager access.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: Cloudflare (Full strict) -> Graviton EC2 Docker Compose (Caddy, Django/Bot, PostgreSQL 17, S3 backup) -> private S3 Standard bucket
+    must:
+      - deploy only in selected project Region; no SSH (port 22 closed); inbound 443 restricted to Cloudflare CIDRs
+      - IMDSv2 required with HttpPutResponseHopLimit=2 so Docker containers reach instance role credentials
+      - retain stateful S3 bucket across stack updates/deletes
+    ref:
+      - at: docs/architecture/README.md
+        has: system context, data stores, operational flows, cost budget
+      - at: docs/adr/README.md
+        has: ADR 0001-0007 architectural decisions
 
 Parameters:
   InstanceType:
@@ -220,11 +233,9 @@ Resources:
           FromPort: 443
           ToPort: 443
           CidrIpv6: 2c0f:f248::/32
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-        - IpProtocol: -1
-          CidrIpv6: ::/0
+      # SecurityGroupEgress is intentionally omitted so CloudFormation resolves the
+      # project's Default VPC without hardcoding VpcId (EC2 rejects SecurityGroupEgress
+      # without VpcId and automatically provisions the default outbound allow-all rule).
 
   OneChapterInstance:
     Type: AWS::EC2::Instance

@@ -37,9 +37,9 @@ COMMAND_ID="$(
         --parameters "commands=[
             'set -euo pipefail',
             'mkdir -p /opt/onechapter',
-            'if [ ! -d /opt/onechapter/.git ]; then git clone --branch ${BRANCH} ${REPO_URL} /opt/onechapter; fi',
+            'if [ ! -d /opt/onechapter/.git ]; then git init -b ${BRANCH} /opt/onechapter && git -C /opt/onechapter remote add origin ${REPO_URL}; fi',
             'cd /opt/onechapter',
-            'git fetch origin ${BRANCH} && git checkout ${BRANCH} && git reset --hard origin/${BRANCH}',
+            'git fetch origin ${BRANCH} && git checkout -B ${BRANCH} origin/${BRANCH} && git reset --hard origin/${BRANCH}',
             'if docker compose -f docker-compose.yml -f docker-compose.prod.yml ps --status running db 2>/dev/null | grep -q db; then echo \"Running pre-deploy PostgreSQL backup to S3...\"; docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm db-backup /bin/sh /app/infra/scripts/db-backup.sh; fi',
             'docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans',
             'for i in 1 2 3 4 5 6 7 8 9 10; do if curl -fsS http://127.0.0.1:43147/health >/dev/null; then echo \"Healthcheck passed.\"; exit 0; fi; sleep 2; done; echo \"Healthcheck timed out.\" >&2; exit 1'
