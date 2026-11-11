@@ -13,6 +13,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   onechapter:
     build: .
@@ -29,6 +34,7 @@ services:
       DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-onechapter-local-reader-key-change-if-you-expose-this}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      ONECHAPTER_DISABLE_BOT_POLLING: ${ONECHAPTER_DISABLE_BOT_POLLING:-0}
       ONECHAPTER_TIMEZONE: ${ONECHAPTER_TIMEZONE:-Asia/Yerevan}
       ONECHAPTER_S3_BUCKET: ${ONECHAPTER_S3_BUCKET:-}
       ONECHAPTER_ACCESS_MODE: ${ONECHAPTER_ACCESS_MODE:-}
@@ -37,6 +43,17 @@ services:
       AWS_REGION: ${AWS_REGION:-eu-north-1}
     volumes:
       - onechapter-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:43147/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   postgres-data:

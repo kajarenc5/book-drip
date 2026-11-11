@@ -301,4 +301,11 @@ def _strip_leading_part_banner(body: str) -> str:
         # Drop the part name / epigraph line if short.
         if lines and len(lines[0].strip()) < 90 and not lines[0].strip().endswith("."):
             lines.pop(0)
+    # Also strip trailing part banners (Глава первая..четвертая + part title + short epigraph)
+    # that appear immediately before the next part's first section title.
+    tail_window = max(0, len(lines) - 12)
+    for idx in range(tail_window, len(lines)):
+        if PART_HEADING.match(lines[idx].strip()):
+            lines = lines[:idx]
+            break
     return paragraphize("\n".join(lines))

@@ -1,9 +1,14 @@
 services:
+  db:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
+
   proxy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
-      - onechapter
+      onechapter:
+        condition: service_healthy
     ports:
       - "443:443"
     volumes:
@@ -11,10 +16,17 @@ services:
       - /etc/onechapter/certs:/etc/onechapter/certs:ro
       - caddy-data:/data
       - caddy-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   onechapter:
     environment:
       DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required in production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-onechapter}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}@db:5432/${POSTGRES_DB:-onechapter}
       ONECHAPTER_ACCESS_MODE: ${ONECHAPTER_ACCESS_MODE:-invite}
       ONECHAPTER_REQUIRE_WEB_LOGIN: ${ONECHAPTER_REQUIRE_WEB_LOGIN:-1}
       ONECHAPTER_PUBLIC_URL: ${ONECHAPTER_PUBLIC_URL:-https://app.onechapter.am}
@@ -30,11 +42,16 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${POSTGRES_DB:-onechapter}
       PGUSER: ${POSTGRES_USER:-onechapter}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-onechapter}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
       ONECHAPTER_S3_BUCKET: ${ONECHAPTER_S3_BUCKET:?ONECHAPTER_S3_BUCKET is required in production}
       AWS_REGION: ${AWS_REGION:-eu-north-1}
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
     command: ["/bin/sh", "/app/infra/scripts/db-backup.sh", "--loop"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   caddy-data:

@@ -15,11 +15,15 @@ COPY data/seed ./data/seed
 COPY infra/scripts ./infra/scripts
 
 RUN uv sync --frozen --no-dev \
-    && DJANGO_DEBUG=0 uv run --no-dev python manage.py collectstatic --noinput
+    && DJANGO_DEBUG=0 DJANGO_SECRET_KEY=build-collectstatic-key uv run --no-dev python manage.py collectstatic --noinput \
+    && useradd --create-home --shell /bin/bash onechapter \
+    && mkdir -p /app/data \
+    && chown -R onechapter:onechapter /app
 
 ENV ONECHAPTER_HOST=0.0.0.0 \
     ONECHAPTER_PORT=43147 \
     ONECHAPTER_TIMEZONE=Asia/Yerevan
 
+USER onechapter
 EXPOSE 43147
 CMD ["uv", "run", "--no-dev", "onechapter", "serve", "--host", "0.0.0.0", "--port", "43147"]

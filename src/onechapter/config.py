@@ -18,6 +18,19 @@ PORT = int(os.environ.get("ONECHAPTER_PORT", "43147"))
 DEFAULT_TIMEZONE = os.environ.get("ONECHAPTER_TIMEZONE", "Asia/Yerevan")
 DEFAULT_DELIVERY = os.environ.get("ONECHAPTER_DELIVERY", "08:00")
 AWS_REGION = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "eu-north-1"))
+MAX_UPLOAD_BYTES = int(os.environ.get("ONECHAPTER_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+
+
+def max_upload_bytes() -> int:
+    return int(os.environ.get("ONECHAPTER_MAX_UPLOAD_BYTES", str(MAX_UPLOAD_BYTES)))
+
+
+def bot_polling_disabled() -> bool:
+    return os.environ.get("ONECHAPTER_DISABLE_BOT_POLLING", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def ensure_dirs() -> None:

@@ -7,9 +7,10 @@ from zoneinfo import ZoneInfo
 from asgiref.sync import sync_to_async
 
 from onechapter.auth import create_magic_login_token
-from onechapter.config import public_url
+from onechapter.config import max_upload_bytes, public_url
 from onechapter.library import (
     active_plan_for_reader,
+    add_reflection,
     already_delivered,
     chapter_count,
     cleanup_staged_upload,
@@ -44,6 +45,7 @@ HELP = """One chapter a day. No more.
 /begin — start (or restart) the current book
 /login — open the web reader signed in as you
 
+Write any note in this chat to save a reflection on today's chapter.
 Send a .mobi, .epub, or .fb2 file to add a book to the library. For Tarasov's Технология жизни, the bot splits the short titled essays, not the four large parts.
 """
 
@@ -306,9 +308,16 @@ async def on_document(update, context) -> None:
     if suffix not in SUPPORTED_SUFFIXES:
         await update.message.reply_text("Send a .mobi, .epub, .fb2, .txt, or .html file.")
         return
+    limit = max_upload_bytes()
+    if getattr(doc, "file_size", None) and doc.file_size > limit:
+        await update.message.reply_text("That file is too large (maximum 25 MB).")
+        return
     await update.message.reply_text("Reading the file and cutting it into daily chapters…")
     tg_file = await context.bot.get_file(doc.file_id)
     data = await tg_file.download_as_bytearray()
+    if len(data) > limit:
+        await update.message.reply_text("That file is too large (maximum 25 MB).")
+        return
     try:
         book, first = await _ingest_and_start_for_reader(name, bytes(data), reader)
         await update.message.reply_text(
@@ -319,6 +328,36 @@ async def on_document(update, context) -> None:
         )
     except Exception as exc:
         await update.message.reply_text(f"Could not split that file: {exc}")
+
+
+@sync_to_async
+def _save_telegram_reflection(reader_id: int, body: str):
+    plan = active_plan_for_reader(None, reader_id)
+    if not plan:
+        return ("no_plan", None)
+    state = state_for_plan(None, plan)
+    position = state.today_position if state.today_position is not None else state.unlocked_through
+    if position is None or position < 0:
+        return ("not_started", None)
+    add_reflection(None, state.plan_id, position, body, source_channel="telegram")
+    return ("ok", (plan["book_title"], position + 1))
+
+
+async def on_text_reflection(update, context) -> None:
+    if not update.message or not update.message.text:
+        return
+    body = update.message.text.strip()
+    if not body:
+        return
+    reader = await _require_allowed_reader(update)
+    if not reader:
+        return
+    status, info = await _save_telegram_reflection(reader.id, body)
+    if status != "ok" or not info:
+        await update.message.reply_text("Start a book with /begin first to save chapter notes.")
+        return
+    book_title, day = info
+    await update.message.reply_text(f"Saved note on day {day} ({book_title}).")
 
 
 @sync_to_async

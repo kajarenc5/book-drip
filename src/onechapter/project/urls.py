@@ -6,9 +6,13 @@ from django.views.static import serve
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("", include("onechapter.reader.urls")),
-    re_path(
-        r"^static/(?P<path>.*)$",
-        serve,
-        {"document_root": str(settings.STATICFILES_DIRS[0])},
-    ),
 ]
+
+if settings.DEBUG:
+    urlpatterns.append(
+        re_path(
+            r"^static/(?P<path>.*)$",
+            serve,
+            {"document_root": str(settings.STATICFILES_DIRS[0])},
+        )
+    )

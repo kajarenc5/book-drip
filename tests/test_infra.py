@@ -122,3 +122,6 @@ def test_docker_compose_and_site_configs_are_valid():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "postgresql-client-17" in dockerfile
     assert "ghcr.io/astral-sh/uv:0.11.1" in dockerfile
+    assert "USER onechapter" in dockerfile
+    assert "healthcheck" in base_compose["services"]["onechapter"]
+    assert (ROOT / "infra" / "aws" / "release.sh").exists()

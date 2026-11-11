@@ -12,10 +12,14 @@ from onechapter.bot.handlers import (
     cmd_read,
     cmd_start,
     cmd_time,
+    on_document,
+    on_text_reflection,
     send_due_chapters,
 )
 from onechapter.bot.runtime import TelegramRuntime
+from onechapter.config import bot_polling_disabled
 from onechapter.library import bootstrap
+from onechapter.reader.models import Reflection
 
 
 class FakeMessage:
@@ -105,4 +109,27 @@ def test_bot_handlers_invite_mode_and_due_delivery(data_dir, monkeypatch):
         assert sent_tomorrow == 1
         assert any(chat_id == 9999 for chat_id, _ in bot_isolated.sent)
 
+        # 6. Sending a text message in Telegram saves a reflection on today's chapter
+        note_update, note_msg = _make_update(4242, "Karen", "karen")
+        note_update.message.text = "A quiet morning reflection from Telegram."
+        await on_text_reflection(note_update, SimpleNamespace())
+        assert any("Saved note on day 1" in r for r in note_msg.replies)
+
+        # 7. Oversized Telegram document upload is rejected before download
+        monkeypatch.setenv("ONECHAPTER_MAX_UPLOAD_BYTES", "100")
+        doc_update, doc_msg = _make_update(4242, "Karen", "karen")
+        doc_update.message.document = SimpleNamespace(file_name="big.mobi", file_size=500, file_id="f1")
+        await on_document(doc_update, SimpleNamespace())
+        assert any("too large" in r for r in doc_msg.replies)
+
     asyncio.run(scenario())
+    saved_ref = Reflection.objects.filter(source_channel="telegram").first()
+    assert saved_ref is not None
+    assert saved_ref.body == "A quiet morning reflection from Telegram."
+
+
+def test_bot_polling_disabled_flag(monkeypatch):
+    monkeypatch.delenv("ONECHAPTER_DISABLE_BOT_POLLING", raising=False)
+    assert bot_polling_disabled() is False
+    monkeypatch.setenv("ONECHAPTER_DISABLE_BOT_POLLING", "1")
+    assert bot_polling_disabled() is True

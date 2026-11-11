@@ -16,6 +16,8 @@
       <p class="flash">That file could not be split. Try EPUB or HTML if the MOBI is encrypted.</p>
     {% elif notice == 'empty' %}
       <p class="flash">The upload was empty.</p>
+    {% elif notice == 'too_large' %}
+      <p class="flash">That file is too large (maximum 25 MB).</p>
     {% endif %}
   </section>
   <ol class="shelf">

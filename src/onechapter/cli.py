@@ -15,6 +15,11 @@ def main(argv: list[str] | None = None) -> None:
     serve = sub.add_parser("serve", help="Run the reader and Telegram bot")
     serve.add_argument("--host", default=HOST)
     serve.add_argument("--port", type=int, default=PORT)
+    serve.add_argument(
+        "--no-bot",
+        action="store_true",
+        help="Run the web reader only without starting Telegram bot polling",
+    )
     ingest = sub.add_parser("ingest", help="Split a book file into daily chapters")
     ingest.add_argument("path")
     reprocess = sub.add_parser(
@@ -43,6 +48,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.cmd in (None, "serve"):
+        if getattr(args, "no_bot", False):
+            os.environ["ONECHAPTER_DISABLE_BOT_POLLING"] = "1"
         host = getattr(args, "host", HOST)
         port = getattr(args, "port", PORT)
         import uvicorn

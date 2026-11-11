@@ -22,8 +22,12 @@ def _bootstrap_and_get_token() -> str:
 
 async def _startup() -> None:
     from onechapter.bot.runtime import runtime as telegram_runtime
+    from onechapter.config import bot_polling_disabled
 
     token = await sync_to_async(_bootstrap_and_get_token)()
+    if bot_polling_disabled():
+        log.info("ONECHAPTER_DISABLE_BOT_POLLING=1 — web reader only; skipping Telegram polling")
+        return
     if token:
         try:
             await telegram_runtime.start(token)

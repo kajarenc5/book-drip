@@ -11,7 +11,7 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 
 from onechapter.auth import verify_magic_login_token, verify_telegram_login_data
 from onechapter.bot.runtime import runtime as telegram_runtime
-from onechapter.config import env_bot_username
+from onechapter.config import env_bot_username, max_upload_bytes
 from onechapter.library import (
     active_plan_for_reader,
     add_reflection,
@@ -290,9 +290,14 @@ def upload(request):
     upload_file = request.FILES.get("file")
     if upload_file is None:
         return SeeOther("/library?notice=empty")
-    data = upload_file.read()
+    limit = max_upload_bytes()
+    if getattr(upload_file, "size", 0) and upload_file.size > limit:
+        return SeeOther("/library?notice=too_large")
+    data = upload_file.read(limit + 1)
     if not data:
         return SeeOther("/library?notice=empty")
+    if len(data) > limit:
+        return SeeOther("/library?notice=too_large")
     path = save_upload(upload_file.name or "book.mobi", data)
     try:
         book = ingest_file(path, uploaded_by=reader, allow_replace=False)
