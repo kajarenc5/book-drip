@@ -83,7 +83,7 @@ Constraints for each level:
 
 # Project & Environment Context (`book-drip` / One Chapter)
 
-- **Workspace**: `/Users/kajarenc7/work/book-drip` on the local Mac (One Chapter — a local Python slow-reading companion app on Telegram and the web). Nothing is currently deployed to AWS.
+- **Workspace**: `/Users/kajarenc7/work/book-drip` on the local Mac (One Chapter — a Python slow-reading companion app on Telegram and the web, deployed in `eu-north-1` behind Cloudflare at `https://onechapter.am` and `https://app.onechapter.am`).
 - **Agent Rule Files**: `.cursor/rules/aws-agent-toolkit.mdc`, `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` contain project and AWS guidance. Read them before any AWS work.
 
 ## Git & GitHub (Source of Truth)

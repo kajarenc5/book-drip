@@ -81,8 +81,8 @@ COMMAND_ID="$(
             'if [ \"\${PUB_CERT}\" != \"\${PUB_KEY}\" ]; then echo \"Error: certificate public key does not match \${KEY_CAND} on EC2.\" >&2; rm -f /etc/onechapter/certs/origin-cf.pem; exit 1; fi',
             'mv -f /etc/onechapter/certs/origin-cf.pem /etc/onechapter/certs/origin.pem',
             'if [ -f /etc/onechapter/certs/origin-cf.key ]; then mv -f /etc/onechapter/certs/origin-cf.key /etc/onechapter/certs/origin.key; fi',
-            'chmod 644 /etc/onechapter/certs/origin.pem',
-            'chmod 600 /etc/onechapter/certs/origin.key',
+            'rm -f /etc/onechapter/certs/origin.csr',
+            'chmod 644 /etc/onechapter/certs/origin.pem /etc/onechapter/certs/origin.key',
             'cd /opt/onechapter && docker compose -f docker-compose.yml -f docker-compose.prod.yml restart proxy',
             'openssl x509 -in /etc/onechapter/certs/origin.pem -noout -subject -issuer -dates'
         ]" \
