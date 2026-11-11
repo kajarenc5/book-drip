@@ -2,18 +2,34 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
-from onechapter.config import DEFAULT_TIMEZONE, ROOT, database_config
+from django.core.exceptions import ImproperlyConfigured
+
+from onechapter.config import DEFAULT_TIMEZONE, MAX_UPLOAD_BYTES, ROOT, database_config
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = PACKAGE_DIR / "web"
 
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY",
-    "onechapter-local-reader-key-change-if-you-expose-this",
-)
+DEFAULT_DEV_SECRET_KEY = "onechapter-local-reader-key-change-if-you-expose-this"
+_INSECURE_SECRET_KEYS = {
+    "",
+    "change-me-in-production",
+    DEFAULT_DEV_SECRET_KEY,
+}
+
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", DEFAULT_DEV_SECRET_KEY)
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") != "0"
+
+if not DEBUG and "collectstatic" not in sys.argv:
+    if SECRET_KEY.strip() in _INSECURE_SECRET_KEYS:
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY must be set to a strong, non-default secret when DJANGO_DEBUG=0."
+        )
+
+DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_BYTES
+FILE_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_BYTES
 
 _allowed_hosts_env = os.environ.get("DJANGO_ALLOWED_HOSTS", "").strip()
 if _allowed_hosts_env:

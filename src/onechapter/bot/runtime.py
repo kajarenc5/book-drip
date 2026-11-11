@@ -21,6 +21,7 @@ from onechapter.bot.handlers import (
     cmd_tz,
     cmd_yesterday,
     on_document,
+    on_text_reflection,
     send_due_chapters,
 )
 
@@ -51,6 +52,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("read", cmd_read))
     app.add_handler(CommandHandler("begin", cmd_begin))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_reflection))
     return app
 
 

@@ -97,3 +97,14 @@ def test_empty_upload_is_rejected(data_dir):
     res = client.post("/upload", {"file": uploaded})
     assert res.status_code == 303
     assert "notice=empty" in res.headers["location"]
+
+
+def test_oversized_upload_is_rejected(data_dir, monkeypatch):
+    monkeypatch.setenv("ONECHAPTER_MAX_UPLOAD_BYTES", "64")
+    client = Client()
+    uploaded = SimpleUploadedFile("huge.txt", b"x" * 128, content_type="text/plain")
+    res = client.post("/upload", {"file": uploaded})
+    assert res.status_code == 303
+    assert "notice=too_large" in res.headers["location"]
+    lib = client.get("/library?notice=too_large")
+    assert "too large" in _text(lib)

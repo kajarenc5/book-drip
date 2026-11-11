@@ -50,8 +50,10 @@ def _from_html_file(path: Path) -> ExtractedBook:
 
 
 def _from_html(html: str, filename: str, title: str | None = None) -> ExtractedBook:
-    from bs4 import BeautifulSoup
+    import warnings
+    from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "nav"]):
         tag.decompose()
@@ -69,10 +71,12 @@ def _from_html(html: str, filename: str, title: str | None = None) -> ExtractedB
 
 
 def _from_epub(path: Path, original_name: str | None = None) -> ExtractedBook:
+    import warnings
     import ebooklib
     from ebooklib import epub
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
     book = epub.read_epub(str(path), options={"ignore_ncx": True})
     title = None
     author = None

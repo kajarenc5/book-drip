@@ -28,6 +28,7 @@ def _tarasov_text(omit: set[str] | None = None) -> str:
         "",
         "Вы держите в руках книгу, которая, возможно, изменит вашу жизнь.",
         "Большинство мыслей, которые вы здесь найдете, не принадлежат мне.",
+        "Эта книга написана для людей, которые хотят переделать свою страну или весь мир.",
         "",
         "Глава первая. Путь",
         "Сначала мы выбираем путь, потом он выбирает нас",
@@ -94,6 +95,9 @@ def test_tarasov_profile_splits_short_essays_not_parts():
     assert "орехами" in monkey.body
     assert "Оглавление" not in monkey.body
     assert monkey.part == "Путь"
+    preface = next(ch for ch in result.chapters if ch.title == "Предисловие")
+    assert "Глава первая" not in preface.body
+    assert "Сначала мы выбираем путь" not in preface.body
     assert len(result.chapters) >= 70
 
 
