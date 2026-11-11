@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
 
@@ -12,8 +12,6 @@ load_dotenv(ROOT / ".env")
 DATA_DIR = Path(os.environ.get("ONECHAPTER_DATA") or (ROOT / "data")).resolve()
 SEED_DIR = ROOT / "data" / "seed"
 UPLOAD_DIR = DATA_DIR / "uploads"
-DB_PATH = DATA_DIR / "app.db"
-SETTINGS_PATH = DATA_DIR / "settings.json"
 
 HOST = os.environ.get("ONECHAPTER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ONECHAPTER_PORT", "43147"))
@@ -107,34 +105,34 @@ def public_url() -> str:
     return f"http://{HOST}:{PORT}"
 
 
-def database_config(default_sqlite_path: Path | None = None) -> dict[str, object]:
+def database_config() -> dict[str, object]:
+    """Return Django DATABASES['default'] configuration (PostgreSQL 17 everywhere)."""
     url = os.environ.get("DATABASE_URL", "").strip()
+    conn_max_age = int(os.environ.get("DJANGO_CONN_MAX_AGE", "60"))
     if not url:
-        sqlite_path = default_sqlite_path or DB_PATH
         return {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": str(sqlite_path),
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("POSTGRES_DB", "onechapter").strip() or "onechapter",
+            "USER": os.environ.get("POSTGRES_USER", "onechapter").strip() or "onechapter",
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", ""),
+            "HOST": os.environ.get("POSTGRES_HOST", "127.0.0.1").strip() or "127.0.0.1",
+            "PORT": str(os.environ.get("ONECHAPTER_PG_PORT", os.environ.get("POSTGRES_PORT", "54329"))),
+            "CONN_MAX_AGE": conn_max_age,
         }
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
-    if scheme in {"postgres", "postgresql", "pgsql"}:
-        return {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": unquote(parsed.path.lstrip("/")) or "onechapter",
-            "USER": unquote(parsed.username or ""),
-            "PASSWORD": unquote(parsed.password or ""),
-            "HOST": parsed.hostname or "localhost",
-            "PORT": str(parsed.port or 5432),
-            "CONN_MAX_AGE": int(os.environ.get("DJANGO_CONN_MAX_AGE", "60")),
-        }
-    if scheme == "sqlite":
-        path_part = unquote(parsed.path or "")
-        if path_part in {"", "/", "/:memory:"} or url.endswith(":memory:"):
-            name = ":memory:"
-        else:
-            name = path_part
-        return {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": name,
-        }
-    raise ValueError(f"Unsupported DATABASE_URL scheme: {scheme}")
+    if scheme not in {"postgres", "postgresql", "pgsql"}:
+        raise ValueError(
+            f"Unsupported DATABASE_URL scheme '{scheme}': One Chapter uses PostgreSQL exclusively."
+        )
+    query = parse_qs(parsed.query)
+    host = query.get("host", [None])[0] or parsed.hostname or "127.0.0.1"
+    return {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": unquote(parsed.path.lstrip("/")) or "onechapter",
+        "USER": unquote(parsed.username or "onechapter"),
+        "PASSWORD": unquote(parsed.password or ""),
+        "HOST": host,
+        "PORT": str(parsed.port or 5432),
+        "CONN_MAX_AGE": conn_max_age,
+    }

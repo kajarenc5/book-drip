@@ -5,6 +5,7 @@ __pycache__/
 .python-version
 .env
 data/app.db
+data/postgres/
 data/uploads/
 data/tmp/
 staticfiles/
