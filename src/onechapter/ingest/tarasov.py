@@ -31,24 +31,29 @@ PARTS = {
 class KnownSection:
     part_id: str
     title: str
+    aliases: tuple[str, ...] = ()
+
+    @property
+    def titles(self) -> tuple[str, ...]:
+        return (self.title, *self.aliases)
 
 
 SECTIONS: tuple[KnownSection, ...] = (
     KnownSection("preface", "Предисловие к третьему изданию"),
-    KnownSection("preface", "Предисловие"),
+    KnownSection("preface", "Предисловие", ("Предисловие автора",)),
     KnownSection("path", "Смысл всякой деятельности лежит вне ее пределов"),
-    KnownSection("path", "Выходи за пределы жизни"),
+    KnownSection("path", "Выходи за пределы жизни", ("Выходите за пределы жизни",)),
     KnownSection("path", "Человек, который кормил обезьян"),
-    KnownSection("path", "Большая цель достижима"),
-    KnownSection("path", "Наметь дату своей смерти"),
+    KnownSection("path", "Большая цель достижима", ("Большую цель можно достигнуть",)),
+    KnownSection("path", "Наметь дату своей смерти", ("Наметьте дату своей смерти",)),
     KnownSection("path", "Мы не знаем, кто стар и кто молод"),
-    KnownSection("path", "Радость неудачи"),
+    KnownSection("path", "Радость неудачи", ("Радости неудачи",)),
     KnownSection("path", "Крестьянин, у которого была лошадь"),
     KnownSection("path", "Словно шарики в ящике, который трясут"),
     KnownSection("path", "Восемь ног паука"),
     KnownSection("path", "Учитель боевых петухов"),
     KnownSection("path", "Горизонтальная карьера"),
-    KnownSection("path", "Управляй из любой точки"),
+    KnownSection("path", "Управляй из любой точки", ("Управляйте из любой точки",)),
     KnownSection("path", "Без жалоб и просьб"),
     KnownSection("path", "Сила и слабость"),
     KnownSection("path", "Пути не пересекаются"),
@@ -69,14 +74,22 @@ SECTIONS: tuple[KnownSection, ...] = (
     KnownSection("manager", "Храбрый не наступает один"),
     KnownSection("manager", "С первым ударом барабана"),
     KnownSection("manager", "Запрещай говорить правду"),
-    KnownSection("manager", "Сначала говорят, а потом и делают"),
+    KnownSection("manager", "Сначала говорят, а потом и делают", ("Сначала говорят, а потом делают",)),
     KnownSection("manager", "Два друга работали в саду"),
     KnownSection("manager", "Говори о том, что есть"),
-    KnownSection("manager", "Не все приказы императора надо выполнять"),
+    KnownSection(
+        "manager",
+        "Не все приказы императора надо выполнять",
+        ("Не все приказы императора",),
+    ),
     KnownSection("manager", "Упаковка поступка"),
     KnownSection("manager", "Казнь ребенка"),
-    KnownSection("manager", "Наказание невиновного"),
-    KnownSection("manager", "Не завоевав сердце, нельзя наказывать"),
+    KnownSection("manager", "Наказание невиновного", ("Наказание невинного",)),
+    KnownSection(
+        "manager",
+        "Не завоевав сердце, нельзя наказывать",
+        ("Не завоевав сердце нельзя наказывать",),
+    ),
     KnownSection("manager", "Награждая и наказывая, не обманывай"),
     KnownSection("manager", "Поднебесная не стоит того"),
     KnownSection("manager", "Дели отряды для грабежа"),
@@ -93,7 +106,7 @@ SECTIONS: tuple[KnownSection, ...] = (
     KnownSection("army", "Располагайся на выгодной местности"),
     KnownSection("army", "Кто не использует проводников"),
     KnownSection("army", "Удерживай вредом"),
-    KnownSection("army", "Будь хозяином, а не гостем"),
+    KnownSection("army", "Будь хозяином, а не гостем", ("Будьте хозяином, не гостем",)),
     KnownSection("army", "Выходи вторым, приходи первым"),
     KnownSection("army", "Не ищи выгоды за сто ли"),
     KnownSection("army", "Помести своих солдат в местность смерти"),
@@ -111,7 +124,7 @@ SECTIONS: tuple[KnownSection, ...] = (
     KnownSection("death", "Боязнь жизни"),
     KnownSection("death", "Рождение человека"),
     KnownSection("death", "Мы и другие"),
-    KnownSection("death", "За пределами жизни"),
+    KnownSection("death", "За пределами жизни", ("Заключение",)),
 )
 
 SKIP_AFTER_TITLES = (

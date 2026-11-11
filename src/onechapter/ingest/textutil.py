@@ -37,7 +37,10 @@ def title_regex(title: str) -> re.Pattern[str]:
     parts = [re.escape(p) for p in squeeze(title).split() if p]
     if not parts:
         return re.compile(r"(?!x)")
-    return re.compile(r"\s+".join(parts), re.IGNORECASE)
+    return re.compile(
+        r"^[ \t]*" + r"\s+".join(parts) + r"[ \t]*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
 
 
 def word_count(text: str) -> int:
