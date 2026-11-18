@@ -11,8 +11,18 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 
 from onechapter.auth import verify_magic_login_token, verify_telegram_login_data
 from onechapter.bot.runtime import runtime as telegram_runtime
-from onechapter.config import env_bot_username, max_upload_bytes
+from onechapter.config import (
+    access_mode,
+    allowed_telegram_ids,
+    env_bot_username,
+    invite_code as configured_invite_code,
+    is_access_allowed,
+    is_local_single_user_dev,
+    max_upload_bytes,
+    operator_telegram_ids,
+)
 from onechapter.library import (
+    _ensure_django_user,
     active_plan_for_reader,
     add_reflection,
     bot_token,
@@ -34,7 +44,7 @@ from onechapter.library import (
     state_for_plan,
     update_reader,
 )
-from onechapter.reader.models import Reader
+from onechapter.reader.models import ChannelIdentity, Reader
 
 log = logging.getLogger(__name__)
 
@@ -60,12 +70,27 @@ def _mask(token: str) -> str:
     return token[:6] + "…" + token[-4:]
 
 
+def _is_reader_blocked_or_inactive(reader) -> bool:
+    if reader.is_blocked:
+        return True
+    if reader.user_id and reader.user and not reader.user.is_active:
+        return True
+    return False
+
+
 def _require_reader_or_redirect(request):
     reader = resolve_web_reader(request)
     if reader is None:
         return None, HttpResponseRedirect("/login")
+    if _is_reader_blocked_or_inactive(reader):
+        return None, HttpResponseForbidden("Access to One Chapter is disabled for this account.")
     if not reader.is_allowed:
-        return None, HttpResponseForbidden("One Chapter is currently invite-only.")
+        msg = (
+            "Access to One Chapter is disabled for this account."
+            if access_mode() == "public"
+            else "One Chapter is currently invite-only."
+        )
+        return None, HttpResponseForbidden(msg)
     return reader, None
 
 
@@ -105,8 +130,11 @@ def telegram_auth(request):
         handle=handle or None,
         invite_code=invite,
     )
+    if _is_reader_blocked_or_inactive(reader):
+        return SeeOther("/login?notice=blocked")
     if not reader.is_allowed:
-        return SeeOther("/login?notice=invite_only")
+        notice = "blocked" if access_mode() == "public" else "invite_only"
+        return SeeOther(f"/login?notice={notice}")
     if reader.user:
         auth_login(request, reader.user)
     return SeeOther("/")
@@ -119,10 +147,48 @@ def magic_auth(request):
     if not payload:
         return SeeOther("/login?notice=expired")
     reader = Reader.objects.select_related("user").filter(id=payload["reader_id"]).first()
-    if not reader or not reader.is_allowed:
+    if not reader:
         return SeeOther("/login?notice=invite_only")
-    if reader.user:
-        auth_login(request, reader.user)
+
+    channel = str(payload.get("channel") or "telegram")
+    ext_id = str(payload.get("external_id") or "")
+    ident = None
+    if ext_id:
+        ident = ChannelIdentity.objects.filter(
+            reader=reader,
+            channel=channel,
+            external_id=ext_id,
+        ).first()
+        if ident is None:
+            return SeeOther("/login?notice=invalid")
+
+    if _is_reader_blocked_or_inactive(reader):
+        return SeeOther("/login?notice=blocked")
+
+    pending_invite = request.session.pop("pending_invite_code", None)
+    if not reader.is_allowed:
+        awaiting_invite = bool(ident and (ident.metadata or {}).get("awaiting_invite"))
+        explicitly_invited_or_allowlisted = bool(
+            (pending_invite and configured_invite_code() and is_access_allowed(ext_id or None, pending_invite))
+            or (ext_id and ext_id in allowed_telegram_ids())
+            or (ext_id and ext_id in operator_telegram_ids())
+        )
+        if is_access_allowed(ext_id or None, pending_invite) and (
+            awaiting_invite or explicitly_invited_or_allowlisted
+        ):
+            reader.is_allowed = True
+            reader.save(update_fields=["is_allowed"])
+            if ident and awaiting_invite:
+                meta = dict(ident.metadata or {})
+                meta.pop("awaiting_invite", None)
+                ident.metadata = meta
+                ident.save(update_fields=["metadata"])
+        else:
+            notice = "blocked" if access_mode() == "public" else "invite_only"
+            return SeeOther(f"/login?notice={notice}")
+
+    user = _ensure_django_user(reader, f"{channel}-{ext_id}" if ext_id else None)
+    auth_login(request, user)
     return SeeOther("/")
 
 
@@ -309,18 +375,31 @@ def upload(request):
         cleanup_staged_upload(path)
 
 
+def _is_operator_reader(reader) -> bool:
+    if not reader or _is_reader_blocked_or_inactive(reader) or not reader.is_allowed or not reader.is_operator:
+        return False
+    op_ids = operator_telegram_ids()
+    if op_ids:
+        tg_id = reader.telegram_id
+        return tg_id is not None and str(tg_id) in op_ids
+    if not is_local_single_user_dev() and access_mode() == "public":
+        return False
+    return True
+
+
 @sync_to_async
 def _load_settings_context(request):
     reader, redirect_resp = _require_reader_or_redirect(request)
     if redirect_resp:
         return None, redirect_resp
     token = bot_token()
+    can_manage_bot = bool(_is_operator_reader(reader) or settings.DEBUG)
     return (
         {
             "reader": reader,
-            "token_masked": _mask(token) if (reader.is_operator or settings.DEBUG) else "",
+            "token_masked": _mask(token) if can_manage_bot else "",
             "has_token": bool(token),
-            "can_edit_token": bool(reader.is_operator or settings.DEBUG),
+            "can_edit_token": can_manage_bot,
             "notice": request.GET.get("notice"),
         },
         None,
@@ -338,7 +417,7 @@ def _apply_settings_update(request, timezone: str, delivery_hhmm: str, token: st
         timezone=timezone.strip(),
         delivery_hhmm=delivery_hhmm.strip(),
     )
-    can_set_token = bool(reader.is_operator or settings.DEBUG)
+    can_set_token = bool(_is_operator_reader(reader) or settings.DEBUG)
     if token and can_set_token:
         set_bot_token(None, token)
     return reader, None, (bool(token) and can_set_token)

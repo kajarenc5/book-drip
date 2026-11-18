@@ -464,9 +464,27 @@ def get_or_create_channel_reader(
         if name and reader.display_name != name:
             reader.display_name = name
             updated_fields.append("display_name")
-        if allowed_now and not reader.is_allowed:
+        user_inactive = bool(reader.user_id and reader.user and not reader.user.is_active)
+        awaiting_invite = bool((ident.metadata or {}).get("awaiting_invite"))
+        explicitly_invited_or_allowlisted = bool(
+            (invite_code and config.invite_code() and config.is_access_allowed(ext_str, invite_code))
+            or ext_str in config.allowed_telegram_ids()
+            or ext_str in config.operator_telegram_ids()
+        )
+        if (
+            allowed_now
+            and not reader.is_allowed
+            and not reader.is_blocked
+            and not user_inactive
+            and (awaiting_invite or explicitly_invited_or_allowlisted)
+        ):
             reader.is_allowed = True
             updated_fields.append("is_allowed")
+            if awaiting_invite:
+                meta = dict(ident.metadata or {})
+                meta.pop("awaiting_invite", None)
+                ident.metadata = meta
+                ident.save(update_fields=["metadata"])
         if updated_fields:
             reader.save(update_fields=updated_fields)
         if handle and ident.handle != handle:
@@ -476,27 +494,52 @@ def get_or_create_channel_reader(
         return reader
 
     with transaction.atomic():
-        # If there is a single initial local Reader with no identity on this channel yet,
-        # and no other allowed identities exist for this channel, unify them into the same Reader!
         existing_channel_count = ChannelIdentity.objects.filter(
             channel=channel,
             reader__is_allowed=True,
         ).count()
-        unlinked_reader = (
-            Reader.objects.filter(is_allowed=True)
-            .exclude(channels__channel=channel)
-            .order_by("id")
-            .first()
-            if existing_channel_count == 0
-            else None
+        existing_operator_channel_count = ChannelIdentity.objects.filter(
+            channel=channel,
+            reader__is_operator=True,
+        ).count()
+        has_explicit_gate = bool(
+            config.allowed_telegram_ids()
+            or config.operator_telegram_ids()
+            or config.invite_code()
         )
-        has_explicit_gate = bool(config.allowed_telegram_ids() or config.invite_code())
         is_first_reader = not Reader.objects.filter(is_allowed=True).exists() and not (
             config.access_mode() == "invite" and has_explicit_gate
         )
         is_allowed = allowed_now or is_first_reader
+        op_ids = config.operator_telegram_ids()
+        if op_ids:
+            can_be_operator = channel == "telegram" and ext_str in op_ids
+        elif config.is_local_single_user_dev():
+            can_be_operator = is_first_reader or existing_channel_count == 0
+        elif config.access_mode() == "invite":
+            can_be_operator = channel == "telegram" and ext_str in config.allowed_telegram_ids()
+        else:
+            # Fail closed in public mode when ONECHAPTER_OPERATOR_TELEGRAM_IDS is empty.
+            can_be_operator = False
 
-        if unlinked_reader is not None and is_allowed:
+        if is_allowed and can_be_operator and existing_operator_channel_count == 0:
+            unlinked_reader = (
+                Reader.objects.filter(is_allowed=True, is_blocked=False, is_operator=True)
+                .exclude(channels__channel=channel)
+                .order_by("id")
+                .first()
+            )
+        elif is_allowed and config.is_local_single_user_dev() and existing_channel_count == 0:
+            unlinked_reader = (
+                Reader.objects.filter(is_allowed=True, is_blocked=False)
+                .exclude(channels__channel=channel)
+                .order_by("id")
+                .first()
+            )
+        else:
+            unlinked_reader = None
+
+        if unlinked_reader is not None:
             reader = unlinked_reader
             if name and (not reader.display_name or reader.display_name == "Local reader"):
                 reader.display_name = name
@@ -507,16 +550,19 @@ def get_or_create_channel_reader(
                 timezone=DEFAULT_TIMEZONE,
                 delivery_hhmm=DEFAULT_DELIVERY,
                 is_allowed=is_allowed,
-                is_operator=is_first_reader or (str(external_id) in config.allowed_telegram_ids()),
+                is_blocked=False,
+                is_operator=can_be_operator,
             )
 
         _ensure_django_user(reader, handle or name or f"{channel}-{ext_str}")
+        initial_metadata = {"awaiting_invite": True} if not is_allowed else {}
         ChannelIdentity.objects.create(
             reader=reader,
             channel=channel,
             external_id=ext_str,
             handle=handle or "",
             is_delivery_enabled=True,
+            metadata=initial_metadata,
         )
         return reader
 
@@ -622,6 +668,26 @@ def active_plan_for_reader(conn_or_reader_id, reader_id: int | None = None):
     )
 
 
+def set_reader_blocked(reader_id: int, blocked: bool = True) -> None:
+    """Block or unblock a Reader account so public mode does not auto-re-enable abusive users."""
+    from onechapter.reader.models import ChannelIdentity, Reader
+
+    init_db()
+    reader = Reader.objects.filter(id=reader_id).first()
+    if not reader:
+        return
+    reader.is_blocked = bool(blocked)
+    reader.is_allowed = not bool(blocked)
+    reader.save(update_fields=["is_blocked", "is_allowed"])
+    if blocked:
+        for ident in ChannelIdentity.objects.filter(reader=reader):
+            if (ident.metadata or {}).get("awaiting_invite"):
+                meta = dict(ident.metadata or {})
+                meta.pop("awaiting_invite", None)
+                ident.metadata = meta
+                ident.save(update_fields=["metadata"])
+
+
 def list_active_plans(conn=None):
     from onechapter.reader.models import ChannelIdentity, Plan
 
@@ -631,9 +697,11 @@ def list_active_plans(conn=None):
         .filter(
             status="active",
             reader__is_allowed=True,
+            reader__is_blocked=False,
             reader__channels__channel="telegram",
             reader__channels__is_delivery_enabled=True,
         )
+        .filter(Q(reader__user__isnull=True) | Q(reader__user__is_active=True))
         .distinct()
     )
     reader_ids = [p.reader_id for p in plans]

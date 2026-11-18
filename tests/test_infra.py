@@ -112,6 +112,8 @@ def test_docker_compose_and_site_configs_are_valid():
     assert base_compose["services"]["db"]["image"] == "postgres:17-alpine"
     assert {"proxy", "onechapter", "db-backup"} <= set(prod_compose["services"].keys())
     assert prod_compose["services"]["proxy"]["image"] == "caddy:2-alpine"
+    prod_app_env = prod_compose["services"]["onechapter"]["environment"]
+    assert "ONECHAPTER_OPERATOR_TELEGRAM_IDS" in prod_app_env
 
     wrangler_raw = (ROOT / "site" / "wrangler.jsonc").read_text(encoding="utf-8")
     wrangler_clean = re.sub(r"//.*", "", wrangler_raw)

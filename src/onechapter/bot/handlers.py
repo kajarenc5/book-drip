@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from asgiref.sync import sync_to_async
 
 from onechapter.auth import create_magic_login_token
-from onechapter.config import max_upload_bytes, public_url
+from onechapter.config import access_mode, max_upload_bytes, public_url
 from onechapter.library import (
     active_plan_for_reader,
     add_reflection,
@@ -54,6 +54,8 @@ INVITE_ONLY_MESSAGE = (
     "Ask the operator for an invite link (/start inv_<code>) to begin reading."
 )
 
+BLOCKED_ACCOUNT_MESSAGE = "Access to One Chapter has been disabled for this account."
+
 
 def _name(update) -> str | None:
     user = update.effective_user
@@ -82,8 +84,13 @@ def _resolve_tg_reader(update, invite_code: str | None = None):
 
 async def _require_allowed_reader(update, invite_code: str | None = None):
     reader = await _resolve_tg_reader(update, invite_code=invite_code)
+    user_inactive = bool(reader.user_id and reader.user and not reader.user.is_active)
+    if reader.is_blocked or user_inactive:
+        await update.message.reply_text(BLOCKED_ACCOUNT_MESSAGE)
+        return None
     if not reader.is_allowed:
-        await update.message.reply_text(INVITE_ONLY_MESSAGE)
+        msg = BLOCKED_ACCOUNT_MESSAGE if access_mode() == "public" else INVITE_ONLY_MESSAGE
+        await update.message.reply_text(msg)
         return None
     return reader
 

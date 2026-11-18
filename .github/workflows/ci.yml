@@ -8,8 +8,24 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: onechapter_test
+          POSTGRES_USER: onechapter
+          POSTGRES_PASSWORD: onechapter
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd="pg_isready -U onechapter -d onechapter_test"
+          --health-interval=3s
+          --health-timeout=3s
+          --health-retries=10
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Run tests
+        env:
+          DATABASE_URL: postgresql://onechapter:onechapter@127.0.0.1:5432/onechapter_test
         run: uv sync --group dev && uv run pytest -q
