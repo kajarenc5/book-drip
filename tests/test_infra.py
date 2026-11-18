@@ -131,3 +131,7 @@ def test_docker_compose_and_site_configs_are_valid():
     caddyfile = (ROOT / "infra" / "docker" / "Caddyfile").read_text(encoding="utf-8")
     assert "request_body" in caddyfile
     assert "max_size 26MB" in caddyfile
+    assert 'X-Content-Type-Options "nosniff"' in caddyfile
+    assert 'Referrer-Policy "strict-origin-when-cross-origin"' in caddyfile
+    assert 'X-Frame-Options "DENY"' in caddyfile
+    assert "Strict-Transport-Security" in caddyfile

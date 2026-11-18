@@ -16,6 +16,7 @@ from onechapter.bot.handlers import (
     cmd_read,
     cmd_resume,
     cmd_start,
+    cmd_stop,
     cmd_time,
     cmd_today,
     cmd_tz,
@@ -46,6 +47,8 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("progress", cmd_progress))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("unsubscribe", cmd_stop))
     app.add_handler(CommandHandler("time", cmd_time))
     app.add_handler(CommandHandler("tz", cmd_tz))
     app.add_handler(CommandHandler("books", cmd_books))
@@ -65,7 +68,15 @@ def build_scheduler(application: Application) -> AsyncIOScheduler:
         except Exception:
             log.exception("Daily delivery tick failed")
 
-    scheduler.add_job(tick, "interval", minutes=1, id="daily-chapter", replace_existing=True)
+    scheduler.add_job(
+        tick,
+        "interval",
+        minutes=1,
+        id="daily-chapter",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     return scheduler
 
 
@@ -103,7 +114,7 @@ class TelegramRuntime:
             raise ValueError("Telegram rejected that token. Copy it again from @BotFather.") from exc
         await application.start()
         assert application.updater is not None
-        await application.updater.start_polling(drop_pending_updates=True)
+        await application.updater.start_polling(drop_pending_updates=False)
         scheduler = build_scheduler(application)
         scheduler.start()
         self.application = application

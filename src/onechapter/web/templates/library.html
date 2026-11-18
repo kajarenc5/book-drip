@@ -4,11 +4,11 @@
   <section class="hero narrow">
     <p class="kicker">Library</p>
     <h1>Choose a book, or bring your own.</h1>
-    <p class="lede">Drop the MOBI of <em>Технология жизни</em> here. The splitter knows Tarasov’s short essays by title, so you get one parable a day, not one of the four large parts.</p>
+    <p class="lede">Start any book on the shelf below, or upload an EPUB, MOBI, FB2, HTML, or plain-text book to split into daily chapters — one per calendar day.</p>
     <form class="drop" action="/upload" method="post" enctype="multipart/form-data">
       {% csrf_token %}
       <label>
-        <span>Upload .mobi, .epub, .fb2, or .txt</span>
+        <span>Upload .epub, .mobi, .fb2, .html, or .txt</span>
         <input type="file" name="file" required accept=".mobi,.azw,.azw3,.epub,.fb2,.txt,.html,.md" onchange="this.form.submit()">
       </label>
     </form>

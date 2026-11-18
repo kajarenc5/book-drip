@@ -217,7 +217,10 @@ def _ensure_database_exists(*, host: str, port: int, user: str, db_name: str) ->
 
 
 def stop_local_postgres() -> bool:
+    from onechapter.db import reset_db_init_cache
+
     _verified_local_dbs.clear()
+    reset_db_init_cache()
     pgdata = local_pg_dir()
     if not (pgdata / "PG_VERSION").exists():
         return False
@@ -242,6 +245,9 @@ def stop_local_postgres() -> bool:
 
 
 def reset_local_database(db_name: str | None = None) -> dict[str, str]:
+    from onechapter.db import reset_db_init_cache
+
+    reset_db_init_cache()
     info = ensure_local_postgres(db_name)
     target_db = info["dbname"]
     subprocess.run(

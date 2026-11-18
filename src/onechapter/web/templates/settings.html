@@ -3,24 +3,47 @@
 {% block main %}
   <section class="hero narrow">
     <p class="kicker">Settings</p>
-    <h1>Telegram delivery</h1>
-    <p class="lede">Talk to <a href="https://t.me/BotFather">@BotFather</a> — <code>/newbot</code>, copy the token, paste it here. The bot starts immediately. Then open it and send <code>/start</code>. You can also send the MOBI as a file in that chat.</p>
-    {% if notice == 'started' %}
+    <h1>Reading &amp; delivery</h1>
+    <p class="lede">Choose when your daily chapter unlocks in your local timezone and whether to receive each day’s chapter on Telegram.</p>
+    {% if notice == 'started' and can_edit_token %}
       <p class="flash ok">Bot is live{% if bot_username %} as <a href="https://t.me/{{ bot_username }}">@{{ bot_username }}</a>{% endif %}. Send /start.</p>
-    {% elif notice == 'bad_token' %}
+    {% elif notice == 'bad_token' and can_edit_token %}
       <p class="flash">Telegram rejected that token. Copy it again from @BotFather.</p>
+    {% elif notice == 'bad_timezone' %}
+      <p class="flash">Unknown timezone. Enter a valid IANA timezone such as <code>Europe/London</code>, <code>America/New_York</code>, or <code>Asia/Yerevan</code>.</p>
+    {% elif notice == 'bad_time' %}
+      <p class="flash">Enter a valid 24-hour delivery time such as <code>08:00</code>.</p>
     {% elif notice == 'saved' %}
       <p class="flash ok">Saved.</p>
     {% endif %}
+
+    {% if delivery_disabled_reason == 'telegram_unreachable' %}
+      <p class="flash">
+        Telegram could not deliver to your chat. Open
+        <a href="https://t.me/{{ bot_username|default:'one_chapter_bot' }}?start=connect">@{{ bot_username|default:'one_chapter_bot' }}</a>
+        and press <strong>Start</strong>, or re-enable daily messages below.
+      </p>
+    {% endif %}
+
     <form class="settings" method="post" action="/settings">
       {% csrf_token %}
+      <input type="hidden" name="telegram_delivery_field" value="1">
       <label>
         Timezone
-        <input type="text" name="timezone" value="{{ reader.timezone }}" required>
+        <input type="text" name="timezone" list="iana-timezones" value="{{ reader.timezone }}" autocomplete="off" required>
       </label>
+      <datalist id="iana-timezones">
+        {% for tz in iana_timezones %}
+          <option value="{{ tz }}"></option>
+        {% endfor %}
+      </datalist>
       <label>
         Daily time
         <input type="time" name="delivery_hhmm" value="{{ reader.delivery_hhmm }}" required>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="telegram_delivery_enabled" value="1" {% if telegram_delivery_enabled %}checked{% endif %}>
+        <span>Send daily chapter on Telegram{% if telegram_handle %} (@{{ telegram_handle }}){% endif %}</span>
       </label>
       {% if can_edit_token %}
       <label>
@@ -30,12 +53,32 @@
       {% endif %}
       <button class="btn" type="submit">Save{% if not bot_running and can_edit_token %} and start bot{% endif %}</button>
     </form>
+
     <p class="meta">
-      {% if bot_running %}
-        Polling as {% if bot_username %}<a href="https://t.me/{{ bot_username }}">@{{ bot_username }}</a>{% else %}a live bot{% endif %}. Daily chapter at {{ reader.delivery_hhmm }} ({{ reader.timezone }}).
+      {% if telegram_delivery_enabled %}
+        Daily chapter at {{ reader.delivery_hhmm }} ({{ reader.timezone }}). To receive messages on Telegram, make sure you have opened
+        <a href="https://t.me/{{ bot_username|default:'one_chapter_bot' }}?start=connect">@{{ bot_username|default:'one_chapter_bot' }}</a>
+        and pressed <strong>Start</strong> once.
       {% else %}
-        Bot is idle. Paste a token and save — no restart needed.
+        Daily Telegram push is off. Your chapters still unlock each day at {{ reader.delivery_hhmm }} ({{ reader.timezone }}) in the web reader, or send <code>/start</code> to
+        <a href="https://t.me/{{ bot_username|default:'one_chapter_bot' }}?start=connect">@{{ bot_username|default:'one_chapter_bot' }}</a>
+        anytime to resume.
       {% endif %}
     </p>
+
+    {% if can_edit_token %}
+      <p class="meta">
+        {% if bot_running %}
+          Polling as {% if bot_username %}<a href="https://t.me/{{ bot_username }}">@{{ bot_username }}</a>{% else %}a live bot{% endif %}.
+        {% else %}
+          Bot is idle. Paste a token and save — no restart needed.
+        {% endif %}
+      </p>
+    {% endif %}
+
+    <form class="signout" method="post" action="/logout">
+      {% csrf_token %}
+      <button class="btn ghost small" type="submit">Sign out</button>
+    </form>
   </section>
 {% endblock %}

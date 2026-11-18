@@ -28,7 +28,10 @@
     <form class="note" method="post" action="/read/{{ book.slug }}/{{ chapter.position }}/note">
       {% csrf_token %}
       <label for="note">A line to keep</label>
-      <textarea id="note" name="body" rows="3" placeholder="What does this ask of today?"></textarea>
+      {% if notice == 'note_too_long' %}
+        <p class="flash">That note is too long (maximum {{ max_reflection_chars|default:10000 }} characters).</p>
+      {% endif %}
+      <textarea id="note" name="body" rows="3" maxlength="{{ max_reflection_chars|default:10000 }}" placeholder="What does this ask of today?"></textarea>
       <button class="btn small" type="submit">Keep</button>
     </form>
     {% if notes %}
