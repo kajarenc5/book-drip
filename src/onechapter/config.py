@@ -19,10 +19,57 @@ DEFAULT_TIMEZONE = os.environ.get("ONECHAPTER_TIMEZONE", "Asia/Yerevan")
 DEFAULT_DELIVERY = os.environ.get("ONECHAPTER_DELIVERY", "08:00")
 AWS_REGION = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "eu-north-1"))
 MAX_UPLOAD_BYTES = int(os.environ.get("ONECHAPTER_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+TELEGRAM_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+UPLOAD_RATE_LIMIT_PER_READER = 5
+UPLOAD_RATE_LIMIT_PER_IP = 10
+UPLOAD_RATE_WINDOW_SECONDS = 600
 
 
 def max_upload_bytes() -> int:
     return int(os.environ.get("ONECHAPTER_MAX_UPLOAD_BYTES", str(MAX_UPLOAD_BYTES)))
+
+
+def telegram_max_upload_bytes() -> int:
+    configured_tg = int(
+        os.environ.get("ONECHAPTER_TELEGRAM_MAX_UPLOAD_BYTES", str(TELEGRAM_MAX_UPLOAD_BYTES))
+    )
+    return min(max_upload_bytes(), configured_tg)
+
+
+def upload_rate_limit_per_reader() -> int:
+    return max(
+        1,
+        int(
+            os.environ.get(
+                "ONECHAPTER_UPLOAD_RATE_LIMIT_PER_READER",
+                str(UPLOAD_RATE_LIMIT_PER_READER),
+            )
+        ),
+    )
+
+
+def upload_rate_limit_per_ip() -> int:
+    return max(
+        1,
+        int(
+            os.environ.get(
+                "ONECHAPTER_UPLOAD_RATE_LIMIT_PER_IP",
+                str(UPLOAD_RATE_LIMIT_PER_IP),
+            )
+        ),
+    )
+
+
+def upload_rate_window_seconds() -> int:
+    return max(
+        1,
+        int(
+            os.environ.get(
+                "ONECHAPTER_UPLOAD_RATE_WINDOW_SECONDS",
+                str(UPLOAD_RATE_WINDOW_SECONDS),
+            )
+        ),
+    )
 
 
 def bot_polling_disabled() -> bool:

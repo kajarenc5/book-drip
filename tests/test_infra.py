@@ -127,3 +127,7 @@ def test_docker_compose_and_site_configs_are_valid():
     assert "USER onechapter" in dockerfile
     assert "healthcheck" in base_compose["services"]["onechapter"]
     assert (ROOT / "infra" / "aws" / "release.sh").exists()
+
+    caddyfile = (ROOT / "infra" / "docker" / "Caddyfile").read_text(encoding="utf-8")
+    assert "request_body" in caddyfile
+    assert "max_size 26MB" in caddyfile

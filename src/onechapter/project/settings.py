@@ -28,7 +28,7 @@ if not DEBUG and "collectstatic" not in sys.argv:
             "DJANGO_SECRET_KEY must be set to a strong, non-default secret when DJANGO_DEBUG=0."
         )
 
-DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_BYTES
+DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_BYTES + (1024 * 1024)
 FILE_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_BYTES
 
 _allowed_hosts_env = os.environ.get("DJANGO_ALLOWED_HOSTS", "").strip()
