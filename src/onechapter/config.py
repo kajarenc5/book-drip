@@ -74,6 +74,13 @@ def allowed_telegram_ids() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def operator_telegram_ids() -> set[str]:
+    raw = os.environ.get("ONECHAPTER_OPERATOR_TELEGRAM_IDS", "").strip()
+    if not raw:
+        return set()
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
 def invite_code() -> str:
     return os.environ.get("ONECHAPTER_INVITE_CODE", "").strip()
 
@@ -93,13 +100,29 @@ def require_web_login() -> bool:
     return not debug
 
 
+def is_local_single_user_dev() -> bool:
+    """Return True only in unconfigured local debug mode (single-developer localhost)."""
+    if os.environ.get("ONECHAPTER_ACCESS_MODE", "").strip():
+        return False
+    if os.environ.get("DJANGO_DEBUG", "1") == "0":
+        return False
+    if require_web_login():
+        return False
+    if allowed_telegram_ids() or operator_telegram_ids() or invite_code():
+        return False
+    return True
+
+
 def is_access_allowed(
     external_id: str | int | None = None,
     provided_invite: str | None = None,
 ) -> bool:
     if access_mode() == "public":
         return True
-    if external_id is not None and str(external_id) in allowed_telegram_ids():
+    if external_id is not None and (
+        str(external_id) in allowed_telegram_ids()
+        or str(external_id) in operator_telegram_ids()
+    ):
         return True
     expected_invite = invite_code()
     if expected_invite and provided_invite:

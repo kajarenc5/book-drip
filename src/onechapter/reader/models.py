@@ -54,6 +54,7 @@ class Reader(DictAccessMixin, models.Model):
     timezone = models.CharField(max_length=64, default=DEFAULT_TIMEZONE)
     delivery_hhmm = models.CharField(max_length=5, default=DEFAULT_DELIVERY)
     is_allowed = models.BooleanField(default=True)
+    is_blocked = models.BooleanField(default=False)
     is_operator = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 

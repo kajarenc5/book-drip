@@ -23,8 +23,10 @@ from onechapter.library import (
     get_or_create_local_reader,
     get_or_create_telegram_reader,
     ingest_file,
+    list_active_plans,
     reflections_for,
     reprocess_book,
+    set_reader_blocked,
     start_book,
     upsert_book_from_split,
 )
@@ -368,3 +370,239 @@ def test_telegram_login_widget_and_magic_link_auth(data_dir, monkeypatch):
     assert tg_resp.headers["location"] == "/"
     ani_reader = Reader.objects.filter(channels__channel="telegram", channels__external_id="888999").first()
     assert ani_reader is not None and ani_reader.is_allowed is True
+
+
+def test_only_operator_telegram_id_can_access_django_admin_via_magic_login(data_dir, monkeypatch):
+    from django.contrib.auth import get_user_model
+
+    init_db()
+    monkeypatch.setenv("DJANGO_DEBUG", "0")
+    monkeypatch.setenv("ONECHAPTER_ACCESS_MODE", "invite")
+    monkeypatch.setenv("ONECHAPTER_OPERATOR_TELEGRAM_IDS", "59911481")
+    monkeypatch.setenv("ONECHAPTER_ALLOWED_TELEGRAM_IDS", "59911481,777888")
+    monkeypatch.setenv("ONECHAPTER_INVITE_CODE", "friendcode2026")
+
+    # Seed initial operator superuser linked to Reader #1 (before any Telegram user connects)
+    User = get_user_model()
+    op_user = User.objects.create_user(username="operator", password="strong-random-password")
+    op_user.is_staff = True
+    op_user.is_superuser = True
+    op_user.save()
+    local_op = get_or_create_local_reader()
+    local_op.user = op_user
+    local_op.is_operator = True
+    local_op.save()
+
+    # 1. Invited friend connects FIRST via invite code — must NOT hijack Reader #1 or become operator
+    invited_friend = get_or_create_telegram_reader(
+        None,
+        123456,
+        "Invited Friend",
+        invite_code="inv_friendcode2026",
+    )
+    assert invited_friend.id != local_op.id
+    assert invited_friend.is_allowed is True
+    assert invited_friend.is_operator is False
+    assert invited_friend.user.is_staff is False
+    assert invited_friend.user.is_superuser is False
+
+    # 2. Allowlisted non-operator connects — allowed to read, but NOT an operator/admin
+    allowlisted_friend = get_or_create_telegram_reader(None, 777888, "Allowlisted Friend")
+    assert allowlisted_friend.id != local_op.id
+    assert allowlisted_friend.is_allowed is True
+    assert allowlisted_friend.is_operator is False
+
+    # 3. Operator (59911481) connects and unifies into Reader #1 (operator superuser)
+    operator_reader = get_or_create_telegram_reader(None, 59911481, "Karen")
+    assert operator_reader.id == local_op.id
+    assert operator_reader.is_operator is True
+    assert operator_reader.user.is_superuser is True
+
+    # 4. Invited friend signs in via /login magic link -> reader works (200), /admin/ is 403 Forbidden
+    friend_magic = create_magic_login_token(invited_friend.id, 123456)
+    friend_client = Client()
+    assert friend_client.get(f"/auth/magic?token={friend_magic}").status_code == 303
+    assert friend_client.get("/").status_code == 200
+    assert friend_client.get("/admin/").status_code == 403
+    assert friend_client.get("/admin/login/").status_code == 403
+
+    # 5. Operator (59911481) signs in via /login magic link -> /admin/ opens directly (200)
+    op_magic = create_magic_login_token(operator_reader.id, 59911481)
+    op_client = Client()
+    assert op_client.get(f"/auth/magic?token={op_magic}").status_code == 303
+    admin_resp = op_client.get("/admin/")
+    assert admin_resp.status_code == 200
+    assert "Site administration" in admin_resp.content.decode()
+
+
+def test_public_mode_operator_isolation_fails_closed_when_operator_ids_empty(data_dir, monkeypatch):
+    from django.contrib.auth import get_user_model
+    from django.test import override_settings
+
+    init_db()
+    monkeypatch.setenv("DJANGO_DEBUG", "0")
+    monkeypatch.setenv("ONECHAPTER_ACCESS_MODE", "public")
+    monkeypatch.setenv("ONECHAPTER_OPERATOR_TELEGRAM_IDS", "")
+    # Even if Stage-1 friend IDs remain in ONECHAPTER_ALLOWED_TELEGRAM_IDS, public mode must not grant operator
+    monkeypatch.setenv("ONECHAPTER_ALLOWED_TELEGRAM_IDS", "444555")
+
+    # Case A: Empty database -> very first public reader must NOT become operator
+    first_public = get_or_create_telegram_reader(None, 444555, "First Visitor")
+    assert first_public.is_allowed is True
+    assert first_public.is_operator is False
+
+    # Case B: Seeded Local reader / privileged superuser exists -> public visitors must NEVER unify into it
+    User = get_user_model()
+    seeded_su = User.objects.create_user(username="seeded-op", password="strong-password")
+    seeded_su.is_staff = True
+    seeded_su.is_superuser = True
+    seeded_su.save()
+    seeded_local_op = Reader.objects.create(
+        user=seeded_su,
+        display_name="Local reader",
+        is_allowed=True,
+        is_operator=True,
+    )
+
+    second_public = get_or_create_telegram_reader(None, 777111, "Public Stranger")
+    assert second_public.id != seeded_local_op.id
+    assert second_public.is_allowed is True
+    assert second_public.is_operator is False
+    assert second_public.user.is_staff is False
+    assert second_public.user.is_superuser is False
+
+    # Public stranger gets 403 on /admin/ and cannot see or mutate bot token on /settings
+    with override_settings(DEBUG=False):
+        stranger_magic = create_magic_login_token(second_public.id, 777111)
+        stranger_client = Client()
+        assert stranger_client.get(f"/auth/magic?token={stranger_magic}").status_code == 303
+        assert stranger_client.get("/admin/").status_code == 403
+        settings_html = stranger_client.get("/settings").content.decode()
+        assert 'name="telegram_bot_token"' not in settings_html
+
+        # Even the seeded superuser session is denied /admin/ in public mode while ONECHAPTER_OPERATOR_TELEGRAM_IDS is empty
+        su_client = Client()
+        su_client.force_login(seeded_su)
+        assert su_client.get("/admin/").status_code == 403
+
+
+def test_public_mode_operator_isolation_with_populated_operator_ids(data_dir, monkeypatch):
+    from django.contrib.auth import get_user_model
+    from django.test import override_settings
+
+    init_db()
+    monkeypatch.setenv("DJANGO_DEBUG", "0")
+    monkeypatch.setenv("ONECHAPTER_ACCESS_MODE", "public")
+    monkeypatch.setenv("ONECHAPTER_OPERATOR_TELEGRAM_IDS", "59911481")
+
+    User = get_user_model()
+    op_user = User.objects.create_user(username="prod-operator", password="strong-password")
+    op_user.is_staff = True
+    op_user.is_superuser = True
+    op_user.save()
+    local_op = get_or_create_local_reader()
+    local_op.user = op_user
+    local_op.is_operator = True
+    local_op.save()
+
+    # Public stranger connects BEFORE the operator -> isolated non-operator Reader
+    early_visitor = get_or_create_telegram_reader(None, 101010, "Early Public Reader")
+    assert early_visitor.id != local_op.id
+    assert early_visitor.is_allowed is True
+    assert early_visitor.is_operator is False
+
+    # Configured operator connects AFTER the public stranger -> unifies into local_op
+    op_reader = get_or_create_telegram_reader(None, 59911481, "Karen")
+    assert op_reader.id == local_op.id
+    assert op_reader.is_operator is True
+
+    with override_settings(DEBUG=False):
+        visitor_client = Client()
+        assert visitor_client.get(
+            f"/auth/magic?token={create_magic_login_token(early_visitor.id, 101010)}"
+        ).status_code == 303
+        assert visitor_client.get("/").status_code == 200
+        assert visitor_client.get("/admin/").status_code == 403
+
+        op_client = Client()
+        assert op_client.get(
+            f"/auth/magic?token={create_magic_login_token(op_reader.id, 59911481)}"
+        ).status_code == 303
+        assert op_client.get("/admin/").status_code == 200
+
+
+def test_magic_auth_access_mode_upgrade_and_operator_blocking_in_public_mode(data_dir, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from onechapter.bot.handlers import BLOCKED_ACCOUNT_MESSAGE, cmd_start
+
+    init_db()
+    monkeypatch.setenv("DJANGO_DEBUG", "0")
+    monkeypatch.setenv("ONECHAPTER_ACCESS_MODE", "invite")
+    monkeypatch.setenv("ONECHAPTER_INVITE_CODE", "launch2026")
+
+    # 1. Waitlisted visitor hits bot in invite mode -> is_allowed=False, magic link denied
+    waitlisted = get_or_create_telegram_reader(None, 303030, "Waitlisted Reader")
+    assert waitlisted.is_allowed is False
+    magic_token = create_magic_login_token(waitlisted.id, 303030)
+
+    client = Client()
+    denied = client.get(f"/auth/magic?token={magic_token}")
+    assert denied.status_code == 303
+    assert "notice=invite_only" in denied.headers["location"]
+
+    # 2. Server switches to ONECHAPTER_ACCESS_MODE=public -> magic_auth re-checks access mode and upgrades waitlisted reader!
+    monkeypatch.setenv("ONECHAPTER_ACCESS_MODE", "public")
+    allowed_resp = client.get(f"/auth/magic?token={magic_token}")
+    assert allowed_resp.status_code == 303
+    assert allowed_resp.headers["location"] == "/"
+    waitlisted.refresh_from_db()
+    assert waitlisted.is_allowed is True
+    assert client.get("/").status_code == 200
+
+    # 3. Start an active reading plan, then operator blocks the abusive account in public mode
+    from onechapter.seed import seed_builtin_books
+
+    seed_builtin_books()
+    slow = get_book("slow-reading")
+    start_book(None, waitlisted.id, slow.id)
+    assert any(p.reader_id == waitlisted.id for p in list_active_plans())
+
+    set_reader_blocked(waitlisted.id, blocked=True)
+    waitlisted.refresh_from_db()
+    assert waitlisted.is_blocked is True
+    assert waitlisted.is_allowed is False
+
+    # Active web session immediately receives 403, magic link is rejected, and active plans exclude blocked reader
+    assert client.get("/").status_code == 403
+    relogin = Client().get(f"/auth/magic?token={magic_token}")
+    assert relogin.status_code == 303
+    assert "notice=blocked" in relogin.headers["location"]
+    assert not any(p.reader_id == waitlisted.id for p in list_active_plans())
+
+    # Sending a new Telegram message in public mode does NOT auto-re-enable the blocked reader!
+    replies: list[str] = []
+
+    async def fake_reply(text: str, **_kwargs):
+        replies.append(text)
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=303030, full_name="Waitlisted Reader", username="waitlisted"),
+        message=SimpleNamespace(reply_text=fake_reply),
+    )
+    asyncio.run(cmd_start(update, SimpleNamespace(args=[])))
+    assert replies == [BLOCKED_ACCOUNT_MESSAGE]
+    waitlisted.refresh_from_db()
+    assert waitlisted.is_blocked is True
+    assert waitlisted.is_allowed is False
+
+    # Also verify that if an operator directly sets is_allowed=False on a public-mode reader (even without set_reader_blocked),
+    # next message in public mode STILL does not auto-re-enable them
+    abusive2 = get_or_create_telegram_reader(None, 404040, "Abusive Two")
+    assert abusive2.is_allowed is True
+    abusive2.is_allowed = False
+    abusive2.save(update_fields=["is_allowed"])
+
+    again = get_or_create_telegram_reader(None, 404040, "Abusive Two")
+    assert again.is_allowed is False

@@ -11,6 +11,8 @@
       <p class="flash">That magic sign-in link has expired. Send <code>/login</code> to the bot for a fresh link.</p>
     {% elif notice == 'invite_only' %}
       <p class="flash">One Chapter is currently invite-only. Ask the operator for an invite code first.</p>
+    {% elif notice == 'blocked' %}
+      <p class="flash">Access to One Chapter has been disabled for this account.</p>
     {% endif %}
     {% if bot_username %}
       <div class="actions">
