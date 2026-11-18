@@ -23,7 +23,7 @@ from onechapter.ingest.extract import (
     validate_source_file,
 )
 from onechapter.ingest.split import ChapterDraft, SplitResult, split_extracted
-from onechapter.ingest.textutil import slugify, squeeze
+from onechapter.ingest.textutil import detect_language, slugify, slugify_ascii, squeeze
 from onechapter.reading import (
     ChapterView,
     PlanState,
@@ -223,6 +223,8 @@ def _validate_split_for_catalog(split: SplitResult) -> SplitResult:
         profile=split.profile,
         chapters=valid_chapters,
         skipped=list(split.skipped),
+        language=split.language,
+        slug=split.slug,
     )
 
 
@@ -254,7 +256,8 @@ def upsert_book_from_split(
         if by_hash:
             return get_book(by_hash.slug)
 
-    target_slug = slug or slugify(split.title)
+    target_slug = slug or split.slug or slugify_ascii(split.title)
+    resolved_language = language or split.language
     base = target_slug
     n = 2
     persisted_new_key: str | None = None
@@ -275,7 +278,7 @@ def upsert_book_from_split(
                         existing,
                         split,
                         filename=safe_source_filename,
-                        language=language,
+                        language=resolved_language,
                         source_sha256=source_sha256,
                         s3_key=s3_key,
                     )
@@ -285,11 +288,14 @@ def upsert_book_from_split(
                             existing.s3_key = persisted_new_key
                             existing.save(update_fields=["s3_key"])
                     return get_book(existing.slug)
-                # Non-destructive upload: if canonical Tarasov or identical source filename/hash
+                # Non-destructive upload: if canonical profile slug or identical source filename/hash
                 # is already in the library, return the existing book without overwriting it.
                 if (
                     split.profile == "tarasov"
                     and existing.slug == "tehnologiya-zhizni"
+                ) or (
+                    split.slug
+                    and existing.slug == split.slug
                 ) or (
                     source_sha256 and existing.source_sha256 == source_sha256
                 ) or (
@@ -305,7 +311,7 @@ def upsert_book_from_split(
                 slug=target_slug,
                 title=split.title,
                 author=split.author,
-                language=language,
+                language=resolved_language,
                 profile=split.profile,
                 source_filename=safe_source_filename,
                 source_sha256=source_sha256,
@@ -471,8 +477,12 @@ def ingest_file(
     split = _validate_split_for_catalog(split_extracted(extracted))
 
     planned_key = storage.build_original_key(digest, safe_name)
-    language = "ru" if split.profile == "tarasov" else None
-    slug = "tehnologiya-zhizni" if split.profile == "tarasov" else None
+    language = (
+        split.language
+        or ("ru" if split.profile == "tarasov" else None)
+        or detect_language(extracted.text, extracted.language)
+    )
+    slug = split.slug or ("tehnologiya-zhizni" if split.profile == "tarasov" else None)
 
     def _persist() -> str:
         _, stored_key, _ = storage.store_original(
@@ -515,7 +525,12 @@ def reprocess_book(slug: str, *, s3_client=None):
     try:
         extracted = extract_path(local_path)
         split = _validate_split_for_catalog(split_extracted(extracted))
-        language = book.language or ("ru" if split.profile == "tarasov" else None)
+        language = (
+            split.language
+            or book.language
+            or ("ru" if split.profile == "tarasov" else None)
+            or detect_language(extracted.text, extracted.language)
+        )
         return upsert_book_from_split(
             None,
             split,

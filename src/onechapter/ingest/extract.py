@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from onechapter import config
-from onechapter.ingest.textutil import paragraphize, squeeze, word_count
+from onechapter.ingest.textutil import detect_language, paragraphize, squeeze, word_count
 
 SUPPORTED_SUFFIXES = {".mobi", ".azw", ".azw3", ".epub", ".fb2", ".html", ".htm", ".txt", ".md"}
 
@@ -101,6 +101,68 @@ _XINCLUDE_RE = re.compile(
 )
 _XML_ENCODING_RE = re.compile(br"<\?xml[^>]*?\bencoding\s*=\s*['\"]([A-Za-z0-9._-]+)['\"]", re.I)
 
+_INLINE_TAGS = {
+    "a",
+    "abbr",
+    "b",
+    "bdi",
+    "bdo",
+    "cite",
+    "code",
+    "del",
+    "dfn",
+    "em",
+    "emphasis",
+    "font",
+    "i",
+    "ins",
+    "kbd",
+    "mark",
+    "q",
+    "s",
+    "samp",
+    "small",
+    "span",
+    "strikethrough",
+    "strong",
+    "sub",
+    "sup",
+    "time",
+    "u",
+    "var",
+}
+_BLOCK_TAGS = {
+    "article",
+    "aside",
+    "blockquote",
+    "dd",
+    "div",
+    "dt",
+    "epigraph",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "p",
+    "pre",
+    "section",
+    "stanza",
+    "subtitle",
+    "text-author",
+    "title",
+    "tr",
+    "v",
+}
+
 
 class UploadValidationError(ValueError):
     """Domain validation failure for untrusted book uploads."""
@@ -118,6 +180,7 @@ class ExtractedBook:
     html: str | None = None
     title: str | None = None
     author: str | None = None
+    language: str | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -132,6 +195,19 @@ def _clamp_meta(value: str | None, limit: int = MAX_METADATA_CHARS) -> str | Non
     if not cleaned:
         return None
     return cleaned[:limit]
+
+
+def _soup_to_paragraphs(root) -> str:
+    for tag in root.find_all(["script", "style", "nav", "svg", "head"]):
+        tag.decompose()
+    for br in root.find_all("br"):
+        br.replace_with("\n")
+    for tag in root.find_all(_INLINE_TAGS):
+        tag.unwrap()
+    for tag in root.find_all(_BLOCK_TAGS):
+        tag.insert_before("\n\n")
+        tag.insert_after("\n\n")
+    return paragraphize(root.get_text())
 
 
 def _safe_xml_parser_factory(**kwargs):
@@ -399,6 +475,7 @@ def _from_text(path: Path) -> ExtractedBook:
         filename=path.name,
         text=cleaned,
         title=_clamp_meta(_guess_title(path, cleaned)),
+        language=detect_language(cleaned),
     )
 
 
@@ -407,27 +484,37 @@ def _from_html_file(path: Path) -> ExtractedBook:
     return _from_html(html, path.name, _guess_title(path, ""))
 
 
-def _from_html(html: str, filename: str, fallback_title: str | None = None) -> ExtractedBook:
+def _from_html(
+    html: str,
+    filename: str,
+    fallback_title: str | None = None,
+    *,
+    title: str | None = None,
+) -> ExtractedBook:
     soup = safe_html_soup(html)
-    for tag in soup(["script", "style", "nav"]):
-        tag.decompose()
-    title = None
-    if soup.title and soup.title.string:
-        title = squeeze(soup.title.string)
-    text = paragraphize(soup.get_text("\n"))
+    html_tag = soup.find("html")
+    declared_lang = None
+    if html_tag:
+        declared_lang = html_tag.get("lang") or html_tag.get("xml:lang")
+    resolved_title = title
+    if not resolved_title and soup.title and soup.title.string:
+        resolved_title = squeeze(soup.title.string)
+    author = _meta_author(soup)
+    text = _soup_to_paragraphs(soup)
     if len(text) > MAX_EXTRACTED_TEXT_CHARS:
         raise UploadValidationError(
             "Extracted HTML text exceeds the maximum supported book length.",
             code="too_large",
         )
-    if not title:
-        title = _guess_title(Path(filename), text) if text else fallback_title
+    if not resolved_title:
+        resolved_title = _guess_title(Path(filename), text) if text else fallback_title
     return ExtractedBook(
         filename=filename,
         html=html,
         text=text,
-        title=_clamp_meta(title),
-        author=_clamp_meta(_meta_author(soup)),
+        title=_clamp_meta(resolved_title),
+        author=_clamp_meta(author),
+        language=detect_language(text, str(declared_lang) if declared_lang else None),
     )
 
 
@@ -647,8 +734,28 @@ def _inspect_epub_zip(path: Path) -> None:
                 )
 
 
-def _from_epub(path: Path, original_name: str | None = None) -> ExtractedBook:
+def _ordered_epub_documents(book):
     import ebooklib
+
+    docs_by_id = {
+        item.get_id(): item for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)
+    }
+    ordered = []
+    seen_ids: set[str] = set()
+    for entry in getattr(book, "spine", None) or []:
+        item_id = entry[0] if isinstance(entry, tuple) else entry
+        item = docs_by_id.get(item_id)
+        if item is not None and item_id not in seen_ids:
+            ordered.append(item)
+            seen_ids.add(item_id)
+    for item_id, item in docs_by_id.items():
+        if item_id not in seen_ids:
+            ordered.append(item)
+            seen_ids.add(item_id)
+    return ordered
+
+
+def _from_epub(path: Path, original_name: str | None = None) -> ExtractedBook:
     from ebooklib import epub
 
     _inspect_epub_zip(path)
@@ -665,11 +772,14 @@ def _from_epub(path: Path, original_name: str | None = None) -> ExtractedBook:
 
     title = None
     author = None
+    dc_lang = None
     try:
         if book.get_metadata("DC", "title"):
             title = str(book.get_metadata("DC", "title")[0][0])
         if book.get_metadata("DC", "creator"):
             author = str(book.get_metadata("DC", "creator")[0][0])
+        if book.get_metadata("DC", "language"):
+            dc_lang = str(book.get_metadata("DC", "language")[0][0]).strip()
     except Exception:
         pass
 
@@ -679,7 +789,7 @@ def _from_epub(path: Path, original_name: str | None = None) -> ExtractedBook:
     total_text_chars = 0
 
     try:
-        doc_items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+        doc_items = _ordered_epub_documents(book)
     except Exception as exc:
         raise UploadValidationError(
             "That EPUB file has an unreadable document spine.",
@@ -702,9 +812,7 @@ def _from_epub(path: Path, original_name: str | None = None) -> ExtractedBook:
             )
         raw = raw_bytes.decode("utf-8", errors="ignore")
         soup = safe_html_soup(raw)
-        for tag in soup(["script", "style"]):
-            tag.decompose()
-        item_text = soup.get_text("\n")
+        item_text = _soup_to_paragraphs(soup)
         total_text_chars += len(item_text)
         if total_text_chars > MAX_EXTRACTED_TEXT_CHARS:
             raise UploadValidationError(
@@ -712,7 +820,8 @@ def _from_epub(path: Path, original_name: str | None = None) -> ExtractedBook:
                 code="too_large",
             )
         html_chunks.append(raw)
-        chunks.append(item_text)
+        if item_text:
+            chunks.append(item_text)
 
     combined_text = paragraphize("\n\n".join(chunks))
     if len(combined_text) > MAX_EXTRACTED_TEXT_CHARS:
@@ -728,6 +837,7 @@ def _from_epub(path: Path, original_name: str | None = None) -> ExtractedBook:
         html=html,
         title=_clamp_meta(resolved_title),
         author=_clamp_meta(author),
+        language=detect_language(combined_text, dc_lang),
     )
 
 
@@ -805,20 +915,32 @@ def _from_fb2(path: Path) -> ExtractedBook:
     soup = safe_xml_soup(cleaned_xml)
     title = None
     author = None
-    title_el = soup.find("book-title")
+    fb2_lang = None
+    author_scope = soup.find("title-info") or soup
+    title_el = author_scope.find("book-title") or soup.find("book-title")
     if title_el:
         title = squeeze(title_el.get_text(" "))
-    author_scope = soup.find("title-info") or soup
     first = author_scope.find("first-name")
     last = author_scope.find("last-name")
     names = [squeeze(n.get_text()) for n in (first, last) if n and squeeze(n.get_text())]
     if names:
         author = " ".join(names)
+    lang_el = author_scope.find("lang")
+    if lang_el:
+        fb2_lang = squeeze(lang_el.get_text())
+
+    all_bodies = soup.find_all("body")
+    main_bodies = [
+        b
+        for b in all_bodies
+        if (b.get("name") or "").strip().lower() not in {"notes", "comments", "footnotes"}
+    ]
+    chosen_bodies = main_bodies or all_bodies
 
     bodies: list[str] = []
     total_chars = 0
-    for body in soup.find_all("body"):
-        chunk = body.get_text("\n")
+    for body in chosen_bodies:
+        chunk = _soup_to_paragraphs(body)
         total_chars += len(chunk)
         if total_chars > MAX_EXTRACTED_TEXT_CHARS:
             raise UploadValidationError(
@@ -835,6 +957,7 @@ def _from_fb2(path: Path) -> ExtractedBook:
         html=cleaned_xml,
         title=_clamp_meta(title or (_guess_title(path, text) if text else None)),
         author=_clamp_meta(author),
+        language=detect_language(text, fb2_lang),
     )
 
 
@@ -979,6 +1102,8 @@ def _from_mobi(path: Path) -> ExtractedBook:
             book = _from_html(html, path.name)
         if not book.title:
             book.title = _clamp_meta(_guess_title(path, book.text))
+        if not book.language:
+            book.language = detect_language(book.text)
         book.filename = path.name
         book.notes.append(f"Unpacked Kindle file via {resolved_target.name}")
         return book

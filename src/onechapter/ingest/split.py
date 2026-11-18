@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from onechapter.ingest import tarasov
+from onechapter.ingest import gosudar, tarasov
 from onechapter.ingest.extract import (
     MAX_METADATA_CHARS,
     ExtractedBook,
     UploadValidationError,
+    _soup_to_paragraphs,
     safe_html_soup,
 )
 from onechapter.ingest.tarasov import PARTS, SKIP_AFTER_TITLES
@@ -44,6 +45,8 @@ class SplitResult:
     profile: str
     chapters: list[ChapterDraft]
     skipped: list[str] = field(default_factory=list)
+    language: str | None = None
+    slug: str | None = None
 
 
 PART_HEADING = re.compile(
@@ -52,6 +55,14 @@ PART_HEADING = re.compile(
 )
 GENERIC_HEADING = re.compile(
     r"^(#{1,3}\s+.+|глава\s+.+|chapter\s+[ivxlcdm0-9]+[.:].+)$",
+    re.IGNORECASE,
+)
+BARE_CHAPTER_NUM_RE = re.compile(
+    r"^(?:глава|chapter)\s+[ivxlcdm0-9]+\.?\s*$",
+    re.IGNORECASE,
+)
+BACK_MATTER_HEADING_RE = re.compile(
+    r"^\s*(?:примечания|комментарии)\s*$",
     re.IGNORECASE,
 )
 
@@ -68,18 +79,30 @@ def _clamp_opt(value: str | None) -> str | None:
     return cleaned[:MAX_METADATA_CHARS] if cleaned else None
 
 
-def split_extracted(book: ExtractedBook) -> SplitResult:
-    if tarasov.looks_like_tarasov(book.filename, book.text):
-        result = split_tarasov(book)
-        if len(result.chapters) >= 20:
-            return result
-    result = split_generic(book)
+def _enforce_max_chapters(result: SplitResult) -> SplitResult:
     if len(result.chapters) > MAX_SPLIT_CHAPTERS:
         raise UploadValidationError(
             f"That file split into too many sections ({len(result.chapters)} chapters).",
             code="unsafe",
         )
     return result
+
+
+def split_extracted(book: ExtractedBook) -> SplitResult:
+    if tarasov.looks_like_tarasov(book.filename, book.text):
+        result = split_tarasov(book)
+        if len(result.chapters) >= 20:
+            return _enforce_max_chapters(result)
+    if gosudar.looks_like_gosudar(
+        book.filename,
+        book.text,
+        title=book.title,
+        author=book.author,
+    ):
+        result = split_gosudar(book)
+        if len(result.chapters) >= 20:
+            return _enforce_max_chapters(result)
+    return _enforce_max_chapters(split_generic(book))
 
 
 def _match_section(
@@ -117,7 +140,7 @@ def split_tarasov(book: ExtractedBook) -> SplitResult:
             break
 
     chapters: list[ChapterDraft] = []
-    for i, (start, title_end, section) in enumerate(found):
+    for i, (_start, title_end, section) in enumerate(found):
         next_start = found[i + 1][0] if i + 1 < len(found) else end_at
         body = paragraphize(text[title_end:next_start])
         body = _strip_leading_part_banner(body)
@@ -145,6 +168,198 @@ def split_tarasov(book: ExtractedBook) -> SplitResult:
         profile="tarasov",
         chapters=chapters,
         skipped=skipped,
+        language="ru",
+        slug="tehnologiya-zhizni",
+    )
+
+
+def _consume_subtitle_lines(lines: list[str], after_idx: int) -> tuple[str, int]:
+    """Collect 1-3 subtitle lines immediately following a bare 'ГЛАВА N' / 'CHAPTER N' line."""
+    j = after_idx
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    subtitle_bits: list[str] = []
+    while j < len(lines):
+        stripped = lines[j].strip()
+        if not stripped:
+            break
+        if gosudar.CHAPTER_HEADING_RE.match(stripped) or re.match(r"^chapter\s+", stripped, re.I):
+            break
+        if stripped.startswith("[") and stripped.endswith("]"):
+            break
+        letters = [c for c in stripped if c.isalpha()]
+        is_all_caps = bool(letters) and all(c.isupper() for c in letters)
+        if len(stripped) > 160 or len(stripped.split()) > 24:
+            break
+        if not is_all_caps and stripped.endswith(".") and subtitle_bits:
+            break
+        if not is_all_caps and stripped.endswith(".") and len(stripped) > 95:
+            break
+        subtitle_bits.append(stripped)
+        j += 1
+        if len(subtitle_bits) >= 3:
+            break
+    return " ".join(subtitle_bits), j
+
+
+def _find_back_matter_line(lines: list[str], start_line: int, titles: tuple[str, ...]) -> int:
+    norm_targets = {normalize_title(t) for t in titles if normalize_title(t)}
+    for idx in range(start_line, len(lines)):
+        stripped = lines[idx].strip()
+        if not stripped or len(stripped) > 60:
+            continue
+        norm = normalize_title(stripped)
+        if norm in norm_targets:
+            prev_blank = idx == 0 or not lines[idx - 1].strip()
+            if prev_blank:
+                return idx
+    return len(lines)
+
+
+def split_gosudar(book: ExtractedBook) -> SplitResult:
+    text = paragraphize(book.text)
+    lines = text.split("\n")
+    skipped: list[str] = []
+
+    raw_candidates: list[tuple[int, int, str, str]] = []
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        m = gosudar.CHAPTER_HEADING_RE.match(stripped) if stripped else None
+        if not m:
+            idx += 1
+            continue
+        roman = gosudar.parse_chapter_numeral(m.group(1))
+        if not roman:
+            idx += 1
+            continue
+        inline_sub = (m.group(2) or "").strip()
+        if inline_sub:
+            subtitle_raw = inline_sub
+            body_start = idx + 1
+        else:
+            subtitle_raw, body_start = _consume_subtitle_lines(lines, idx + 1)
+        raw_candidates.append((idx, body_start, roman, subtitle_raw))
+        idx = max(idx + 1, body_start)
+
+    valid_chapters: list[tuple[int, int, int, str, str]] = []
+    for c_i, (head_line, body_start, roman, subtitle_raw) in enumerate(raw_candidates):
+        next_head = (
+            raw_candidates[c_i + 1][0]
+            if c_i + 1 < len(raw_candidates)
+            else _find_back_matter_line(lines, body_start, gosudar.SKIP_AFTER_TITLES)
+        )
+        for scan_i in range(body_start, next_head):
+            s = lines[scan_i].strip()
+            if s and len(s) <= 100 and (
+                gosudar.DEDICATION_HEADING_RE.match(s)
+                or gosudar.FRONT_EDITORIAL_HEADING_RE.match(s)
+            ):
+                prev_blank = scan_i == 0 or not lines[scan_i - 1].strip()
+                if prev_blank:
+                    next_head = scan_i
+                    break
+        probe_body = paragraphize("\n".join(lines[body_start:next_head]))
+        if word_count(probe_body) < 25 or _looks_like_toc(probe_body):
+            continue
+        valid_chapters.append((head_line, body_start, next_head, roman, subtitle_raw))
+
+    # Select a strictly increasing line-order chain of chapters I..XXVI.
+    candidates_by_roman: dict[str, list[tuple[int, int, int, str, str]]] = {}
+    for entry in valid_chapters:
+        candidates_by_roman.setdefault(entry[3], []).append(entry)
+
+    ordered_entries: list[tuple[int, int, int, str, str]] = []
+    cursor_line = -1
+    for r in gosudar.ROMAN_NUMERALS:
+        options = [e for e in candidates_by_roman.get(r, []) if e[0] > cursor_line]
+        if not options:
+            skipped.append(f"Глава {r}")
+            continue
+        chosen = options[0]
+        ordered_entries.append(chosen)
+        cursor_line = chosen[0]
+
+    chapters: list[ChapterDraft] = []
+    if ordered_entries:
+        first_ch_line = ordered_entries[0][0]
+        last_body_start = ordered_entries[-1][1]
+        back_cutoff = _find_back_matter_line(lines, last_body_start, gosudar.SKIP_AFTER_TITLES)
+        stripped_endnotes = back_cutoff < len(lines)
+
+        # Locate the Dedication before Chapter I, ignoring TOC lines or editorial prefaces.
+        ded_candidates: list[tuple[int, str]] = []
+        for line_i in range(0, first_ch_line):
+            s = lines[line_i].strip()
+            if s and gosudar.DEDICATION_HEADING_RE.match(s):
+                ded_candidates.append((line_i, s))
+
+        for ded_line, ded_heading in reversed(ded_candidates):
+            ded_end = first_ch_line
+            for scan_i in range(ded_line + 1, first_ch_line):
+                s = lines[scan_i].strip()
+                if s and gosudar.FRONT_EDITORIAL_HEADING_RE.match(s) and len(s) <= 80:
+                    prev_blank = scan_i == 0 or not lines[scan_i - 1].strip()
+                    if prev_blank:
+                        ded_end = scan_i
+                        break
+            ded_prose = gosudar.clean_prose_body(
+                "\n".join(lines[ded_line + 1 : ded_end]),
+                strip_endnote_refs=stripped_endnotes,
+            )
+            if word_count(ded_prose) >= 60 and not _looks_like_toc(ded_prose):
+                if "лоренцо" in ded_heading.lower():
+                    ded_body = f"{gosudar.CANONICAL_SALUTATION}\n\n{ded_prose}"
+                else:
+                    ded_body = ded_prose
+                chapters.append(
+                    ChapterDraft(
+                        index=0,
+                        title=_clamp(gosudar.CANONICAL_DEDICATION_TITLE, "Посвящение"),
+                        body=ded_body,
+                        part=_clamp_opt(gosudar.CANONICAL_PART),
+                        source="prince_ru",
+                    )
+                )
+                break
+        else:
+            skipped.append(gosudar.CANONICAL_DEDICATION_TITLE)
+
+        for e_i, (_head_line, body_start, _probe_end, roman, subtitle_raw) in enumerate(
+            ordered_entries
+        ):
+            ch_end = (
+                ordered_entries[e_i + 1][0]
+                if e_i + 1 < len(ordered_entries)
+                else back_cutoff
+            )
+            body = gosudar.clean_prose_body(
+                "\n".join(lines[body_start:ch_end]),
+                strip_endnote_refs=stripped_endnotes,
+            )
+            if word_count(body) < 25:
+                skipped.append(f"Глава {roman} (too short)")
+                continue
+            subtitle = gosudar.format_russian_subtitle(subtitle_raw)
+            full_title = f"Глава {roman}. {subtitle}" if subtitle else f"Глава {roman}"
+            chapters.append(
+                ChapterDraft(
+                    index=len(chapters),
+                    title=_clamp(full_title, f"Глава {roman}"),
+                    body=body,
+                    part=_clamp_opt(gosudar.CANONICAL_PART),
+                    source="prince_ru",
+                )
+            )
+
+    return SplitResult(
+        title=_clamp(gosudar.CANONICAL_TITLE, "Государь"),
+        author=_clamp_opt(gosudar.CANONICAL_AUTHOR),
+        profile="prince",
+        chapters=chapters,
+        skipped=skipped,
+        language="ru",
+        slug=gosudar.CANONICAL_SLUG,
     )
 
 
@@ -178,18 +393,26 @@ def split_generic(book: ExtractedBook) -> SplitResult:
         author=_clamp_opt(book.author),
         profile="generic",
         chapters=chapters,
+        language=book.language,
     )
 
 
 def _split_html_headings(book: ExtractedBook, soup) -> SplitResult:
+    from bs4 import Tag
+
     chapters: list[ChapterDraft] = []
     current_title = book.title or "Opening"
     current_part = None
-    chunks: list[str] = []
+    fragment_parts: list[str] = []
 
     def flush() -> None:
-        body = paragraphize("\n".join(chunks))
-        if word_count(body) < MIN_CHAPTER_WORDS:
+        if not fragment_parts:
+            return
+        frag_soup = safe_html_soup("".join(fragment_parts))
+        body = _soup_to_paragraphs(frag_soup)
+        if word_count(body) < MIN_CHAPTER_WORDS or _looks_like_toc(body):
+            return
+        if BACK_MATTER_HEADING_RE.match(current_title.strip()):
             return
         chapters.append(
             ChapterDraft(
@@ -201,25 +424,28 @@ def _split_html_headings(book: ExtractedBook, soup) -> SplitResult:
             )
         )
 
-    from bs4 import NavigableString, Tag
+    for tag in soup.find_all(["script", "style", "nav"]):
+        tag.decompose()
+    root = soup.body or soup
 
-    body = soup.body or soup
-    for el in body.descendants:
-        if isinstance(el, Tag) and el.name in {"h1", "h2", "h3"}:
-            flush()
-            chunks = []
-            heading = el.get_text(" ", strip=True)
-            if PART_HEADING.match(heading):
-                current_part = heading
-                current_title = heading
+    def _walk(node) -> None:
+        nonlocal current_title, current_part, fragment_parts
+        for child in getattr(node, "children", []):
+            if isinstance(child, Tag) and child.name in {"h1", "h2", "h3"}:
+                flush()
+                fragment_parts = []
+                heading = child.get_text(" ", strip=True)
+                if PART_HEADING.match(heading):
+                    current_part = heading
+                    current_title = heading
+                else:
+                    current_title = heading
+            elif isinstance(child, Tag) and child.find(["h1", "h2", "h3"]):
+                _walk(child)
             else:
-                current_title = heading
-            continue
-        if isinstance(el, NavigableString) and el.parent and el.parent.name not in {"h1", "h2", "h3", "script", "style"}:
-            if el.parent.name in {"p", "div", "li", "span"} or el.strip():
-                text_val = str(el)
-                if text_val.strip():
-                    chunks.append(text_val)
+                fragment_parts.append(str(child))
+
+    _walk(root)
     flush()
     if len(chapters) < 3:
         return SplitResult(
@@ -227,50 +453,46 @@ def _split_html_headings(book: ExtractedBook, soup) -> SplitResult:
             author=_clamp_opt(book.author),
             profile="generic",
             chapters=_split_text_headings(book.text),
+            language=book.language,
         )
     return SplitResult(
         title=_clamp(book.title or book.filename, "Book"),
         author=_clamp_opt(book.author),
         profile="generic",
         chapters=chapters,
+        language=book.language,
     )
 
 
 def _split_text_headings(text: str) -> list[ChapterDraft]:
     lines = text.split("\n")
-    starts: list[tuple[int, str]] = []
-    for i, line in enumerate(lines):
-        stripped = line.strip()
+    end_limit = _find_back_matter_line(lines, 0, ("Примечания", "Комментарии"))
+    lines = lines[:end_limit]
+    starts: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
         if not stripped:
+            i += 1
             continue
-        if GENERIC_HEADING.match(stripped) or re.match(
-            r"^CHAPTER\s+[IVXLCDM0-9]+\.?\s*$", stripped, re.I
-        ):
-            starts.append((i, re.sub(r"^#+\s*", "", stripped)))
-    if len(starts) < 3:
-        # Machiavelli-style: CHAPTER N. on one line, title on the next.
-        starts = []
-        for i, line in enumerate(lines):
-            if re.match(r"^CHAPTER\s+[IVXLCDM0-9]+\.?", line.strip(), re.I):
-                title_bits = [line.strip()]
-                j = i + 1
-                while j < len(lines) and lines[j].strip() and not lines[j].strip().endswith("."):
-                    if re.match(r"^CHAPTER\s+", lines[j], re.I):
-                        break
-                    if len(lines[j].strip()) > 90:
-                        break
-                    title_bits.append(lines[j].strip())
-                    j += 1
-                    if j > i + 3:
-                        break
-                starts.append((i, " ".join(title_bits)))
+        if BARE_CHAPTER_NUM_RE.match(stripped):
+            subtitle, body_start = _consume_subtitle_lines(lines, i + 1)
+            head = stripped.rstrip(".")
+            full_title = f"{head}. {subtitle}" if subtitle else stripped
+            starts.append((i, body_start, full_title))
+            i = max(i + 1, body_start)
+            continue
+        if GENERIC_HEADING.match(stripped):
+            clean_head = re.sub(r"^#+\s*", "", stripped)
+            starts.append((i, i + 1, clean_head))
+        i += 1
     return _slices_from_line_starts(lines, starts)
 
 
 def _split_short_title_blocks(text: str) -> list[ChapterDraft]:
     """Split on isolated short title lines — the Tarasov-without-profile fallback."""
     lines = text.split("\n")
-    starts: list[tuple[int, str]] = []
+    starts: list[tuple[int, int, str]] = []
     for i, line in enumerate(lines):
         stripped = line.strip()
         if not stripped or len(stripped) > 90:
@@ -282,20 +504,23 @@ def _split_short_title_blocks(text: str) -> list[ChapterDraft]:
         prev_blank = i == 0 or not lines[i - 1].strip()
         nxt = next((lines[j] for j in range(i + 1, min(i + 4, len(lines))) if lines[j].strip()), "")
         if prev_blank and nxt and len(nxt) > 40:
-            starts.append((i, stripped))
+            starts.append((i, i + 1, stripped))
     return _slices_from_line_starts(lines, starts)
 
 
-def _slices_from_line_starts(lines: list[str], starts: list[tuple[int, str]]) -> list[ChapterDraft]:
+def _slices_from_line_starts(
+    lines: list[str],
+    starts: list[tuple[int, int, str]],
+) -> list[ChapterDraft]:
     if not starts:
         return []
     chapters: list[ChapterDraft] = []
     part = None
-    for i, (line_no, title) in enumerate(starts):
-        if PART_HEADING.match(title):
+    for i, (_line_no, body_start, title) in enumerate(starts):
+        if PART_HEADING.match(title) and not BARE_CHAPTER_NUM_RE.match(title.split(".")[0]):
             part = title
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
-        body_lines = lines[line_no + 1 : end]
+        body_lines = lines[body_start:end]
         body = paragraphize("\n".join(body_lines))
         if word_count(body) < MIN_CHAPTER_WORDS:
             continue

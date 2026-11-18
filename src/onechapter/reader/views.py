@@ -17,7 +17,7 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from onechapter.auth import verify_magic_login_token, verify_telegram_login_data
 from onechapter.bot.runtime import runtime as telegram_runtime
 from onechapter.config import (
-     DEFAULT_TIMEZONE,
+    DEFAULT_TIMEZONE,
     access_mode,
     allowed_telegram_ids,
     env_bot_username,
@@ -29,6 +29,7 @@ from onechapter.config import (
     operator_telegram_ids,
 )
 from onechapter.ingest.extract import SUPPORTED_SUFFIXES, UploadValidationError
+from onechapter.ingest.textutil import detect_language, normalize_lang_code
 from onechapter.library import (
     _ensure_django_user,
     active_plan_for_reader,
@@ -67,11 +68,27 @@ class SeeOther(HttpResponseRedirect):
     status_code = 303
 
 
-def _chapter_lang(plan) -> str:
-    author = (plan["author"] if plan is not None else "") or ""
-    if "Тарасов" in author:
-        return "ru"
-    return "en"
+def _chapter_lang(target) -> str:
+    if target is None:
+        return "en"
+    book_obj = getattr(target, "book", None)
+    raw_lang = None
+    if book_obj is not None:
+        raw_lang = getattr(book_obj, "language", None)
+    if not raw_lang:
+        raw_lang = getattr(target, "language", None)
+    if not raw_lang and hasattr(target, "get"):
+        raw_lang = target.get("language")
+    norm = normalize_lang_code(raw_lang)
+    if norm:
+        return norm
+    author = (target.get("author") if hasattr(target, "get") else getattr(target, "author", "")) or ""
+    title = (
+        (target.get("book_title") or target.get("title"))
+        if hasattr(target, "get")
+        else (getattr(target, "book_title", None) or getattr(target, "title", ""))
+    ) or ""
+    return detect_language(f"{title} {author}") or "en"
 
 
 def _mask(token: str) -> str:
@@ -370,6 +387,7 @@ def read_chapter(request, slug: str, position: int):
             "nxt": nxt if nxt and position + 1 <= state.unlocked_through else None,
             "prev": prev,
             "notes": notes,
+            "chapter_lang": _chapter_lang(book),
             "notice": request.GET.get("notice"),
             "max_reflection_chars": max_reflection_chars(),
         },
