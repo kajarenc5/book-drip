@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
+from pathlib import Path
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth import login as auth_login, logout as auth_logout
+from django.core.exceptions import RequestDataTooBig
 from django.http import HttpResponseForbidden, HttpResponseRedirect, JsonResponse
+from django.http.multipartparser import MultiPartParserError
 from django.shortcuts import render
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
@@ -21,12 +25,14 @@ from onechapter.config import (
     max_upload_bytes,
     operator_telegram_ids,
 )
+from onechapter.ingest.extract import SUPPORTED_SUFFIXES, UploadValidationError
 from onechapter.library import (
     _ensure_django_user,
     active_plan_for_reader,
     add_reflection,
     bot_token,
     chapter_views,
+    check_upload_rate_limit,
     cleanup_staged_upload,
     get_book,
     get_chapter,
@@ -348,28 +354,94 @@ def add_note(request, slug: str, position: int):
     return SeeOther(f"/read/{slug}/{position}")
 
 
+_VALID_UPLOAD_NOTICES = frozenset(
+    {
+        "empty",
+        "too_large",
+        "unsupported",
+        "unsafe",
+        "corrupt",
+        "no_chapters",
+        "rate_limited",
+        "fail",
+    }
+)
+
+
+def _client_ip(request) -> str:
+    remote_addr = (request.META.get("REMOTE_ADDR") or "").strip()
+    trusted_proxy = False
+    if remote_addr:
+        try:
+            addr = ipaddress.ip_address(remote_addr)
+            trusted_proxy = addr.is_loopback or addr.is_private
+        except ValueError:
+            trusted_proxy = False
+
+    if trusted_proxy:
+        cf_ip = (request.META.get("HTTP_CF_CONNECTING_IP") or "").strip()
+        if cf_ip:
+            return cf_ip
+        xff = (request.META.get("HTTP_X_FORWARDED_FOR") or "").strip()
+        if xff:
+            first_hop = xff.split(",")[0].strip()
+            if first_hop:
+                return first_hop
+    return remote_addr or "unknown"
+
+
 @require_POST
 def upload(request):
     reader, redirect_resp = _require_reader_or_redirect(request)
     if redirect_resp:
         return redirect_resp
-    upload_file = request.FILES.get("file")
+
+    try:
+        check_upload_rate_limit(
+            reader_id=reader["id"],
+            client_ip=_client_ip(request),
+        )
+    except UploadValidationError:
+        return SeeOther("/library?notice=rate_limited")
+
+    try:
+        upload_file = request.FILES.get("file")
+    except (RequestDataTooBig, MultiPartParserError):
+        return SeeOther("/library?notice=too_large")
+
     if upload_file is None:
         return SeeOther("/library?notice=empty")
+
+    raw_name = upload_file.name or ""
+    suffix = Path(raw_name).suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        return SeeOther("/library?notice=unsupported")
+
     limit = max_upload_bytes()
-    if getattr(upload_file, "size", 0) and upload_file.size > limit:
+    file_size = getattr(upload_file, "size", 0) or 0
+    if file_size > limit:
         return SeeOther("/library?notice=too_large")
-    data = upload_file.read(limit + 1)
+
+    try:
+        data = upload_file.read(limit + 1)
+    except (RequestDataTooBig, MultiPartParserError, OSError):
+        return SeeOther("/library?notice=too_large")
+
     if not data:
         return SeeOther("/library?notice=empty")
     if len(data) > limit:
         return SeeOther("/library?notice=too_large")
-    path = save_upload(upload_file.name or "book.mobi", data)
+
+    path = save_upload(raw_name, data)
     try:
         book = ingest_file(path, uploaded_by=reader, allow_replace=False)
         return SeeOther(f"/book/{book['slug']}")
+    except UploadValidationError as exc:
+        log.warning("Rejected uploaded file %r (%s): %s", raw_name, exc.code, exc)
+        notice = exc.code if exc.code in _VALID_UPLOAD_NOTICES else "fail"
+        return SeeOther(f"/library?notice={notice}")
     except Exception:
-        log.exception("Ingest failed")
+        log.exception("Unexpected error during web upload")
         return SeeOther("/library?notice=fail")
     finally:
         cleanup_staged_upload(path)

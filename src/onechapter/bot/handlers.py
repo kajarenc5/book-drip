@@ -7,12 +7,14 @@ from zoneinfo import ZoneInfo
 from asgiref.sync import sync_to_async
 
 from onechapter.auth import create_magic_login_token
-from onechapter.config import access_mode, max_upload_bytes, public_url
+from onechapter.config import access_mode, public_url, telegram_max_upload_bytes
+from onechapter.ingest.extract import SUPPORTED_SUFFIXES, UploadValidationError
 from onechapter.library import (
     active_plan_for_reader,
     add_reflection,
     already_delivered,
     chapter_count,
+    check_upload_rate_limit,
     cleanup_staged_upload,
     get_book,
     get_chapter,
@@ -303,28 +305,68 @@ def _ingest_and_start_for_reader(name: str, data: bytes, reader):
         cleanup_staged_upload(path)
 
 
+def _telegram_size_limit_message(limit_bytes: int) -> str:
+    mb = limit_bytes / (1024 * 1024)
+    if mb >= 1:
+        label = f"{int(mb)} MB" if mb.is_integer() else f"{mb:.1f} MB"
+    else:
+        label = f"{limit_bytes} bytes"
+    return (
+        f"That file is too large for Telegram (maximum {label}). "
+        "Upload larger books (up to 25 MB) in the web reader."
+    )
+
+
 async def on_document(update, context) -> None:
     reader = await _require_allowed_reader(update)
     if not reader:
         return
-    doc = update.message.document
-    name = doc.file_name or "book"
-    suffix = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    from onechapter.ingest.extract import SUPPORTED_SUFFIXES
+    doc = getattr(update.message, "document", None)
+    if doc is None:
+        return
 
+    try:
+        check_upload_rate_limit(reader_id=reader.id)
+    except UploadValidationError as exc:
+        await update.message.reply_text(exc.user_message)
+        return
+
+    name = (doc.file_name or "").strip()
+    suffix = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
     if suffix not in SUPPORTED_SUFFIXES:
-        await update.message.reply_text("Send a .mobi, .epub, .fb2, .txt, or .html file.")
+        await update.message.reply_text(
+            "Unsupported file format. Send a .mobi, .azw, .azw3, .epub, .fb2, .html, .txt, or .md file."
+        )
         return
-    limit = max_upload_bytes()
-    if getattr(doc, "file_size", None) and doc.file_size > limit:
-        await update.message.reply_text("That file is too large (maximum 25 MB).")
+
+    limit = telegram_max_upload_bytes()
+    file_size = getattr(doc, "file_size", None)
+    if file_size is not None and file_size <= 0:
+        await update.message.reply_text("That file is empty.")
         return
+    if file_size is not None and file_size > limit:
+        await update.message.reply_text(_telegram_size_limit_message(limit))
+        return
+
     await update.message.reply_text("Reading the file and cutting it into daily chapters…")
-    tg_file = await context.bot.get_file(doc.file_id)
-    data = await tg_file.download_as_bytearray()
-    if len(data) > limit:
-        await update.message.reply_text("That file is too large (maximum 25 MB).")
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        data = await tg_file.download_as_bytearray()
+    except Exception as exc:
+        if "file is too big" in str(exc).lower() or "too large" in str(exc).lower():
+            await update.message.reply_text(_telegram_size_limit_message(limit))
+            return
+        log.warning("Could not download Telegram document for reader=%s: %s", reader.id, exc)
+        await update.message.reply_text("Could not download that file from Telegram. Please try again.")
         return
+
+    if not data:
+        await update.message.reply_text("That file is empty.")
+        return
+    if len(data) > limit:
+        await update.message.reply_text(_telegram_size_limit_message(limit))
+        return
+
     try:
         book, first = await _ingest_and_start_for_reader(name, bytes(data), reader)
         await update.message.reply_text(
@@ -333,8 +375,14 @@ async def on_document(update, context) -> None:
             f"First: {first}\n\n"
             "Send /today to read the first one now."
         )
-    except Exception as exc:
-        await update.message.reply_text(f"Could not split that file: {exc}")
+    except UploadValidationError as exc:
+        log.warning("Rejected Telegram document %r for reader=%s (%s): %s", name, reader.id, exc.code, exc)
+        await update.message.reply_text(f"Could not import that file: {exc.user_message}")
+    except Exception:
+        log.exception("Unexpected error during Telegram document ingest")
+        await update.message.reply_text(
+            "Could not process that file. Make sure it is a valid, unencrypted book file."
+        )
 
 
 @sync_to_async

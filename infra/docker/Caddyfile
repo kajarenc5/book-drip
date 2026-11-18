@@ -1,6 +1,10 @@
 app.onechapter.am {
     tls /etc/onechapter/certs/origin.pem /etc/onechapter/certs/origin.key
 
+    request_body {
+        max_size 26MB
+    }
+
     @static path /static/*
     header @static Cache-Control "public, max-age=31536000, immutable"
 

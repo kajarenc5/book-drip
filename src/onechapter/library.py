@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import shutil
+import threading
+import time
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
@@ -13,9 +16,14 @@ from django.db.models.functions import Coalesce
 from onechapter import config, storage
 from onechapter.config import DEFAULT_DELIVERY, DEFAULT_TIMEZONE, ensure_dirs
 from onechapter.db import init_db
-from onechapter.ingest.extract import extract_path
+from onechapter.ingest.extract import (
+    MAX_METADATA_CHARS,
+    UploadValidationError,
+    extract_path,
+    validate_source_file,
+)
 from onechapter.ingest.split import ChapterDraft, SplitResult, split_extracted
-from onechapter.ingest.textutil import slugify
+from onechapter.ingest.textutil import slugify, squeeze
 from onechapter.reading import (
     ChapterView,
     PlanState,
@@ -114,6 +122,110 @@ def get_chapter(conn_or_book_id, book_id_or_pos: int, position: int | None = Non
     return Chapter.objects.filter(book_id=actual_book_id, position=actual_pos).first()
 
 
+_upload_rate_lock = threading.Lock()
+_upload_rate_buckets: dict[str, list[float]] = {}
+_MAX_TRACKED_RATE_BUCKETS = 4_096
+
+
+def reset_upload_rate_limits() -> None:
+    with _upload_rate_lock:
+        _upload_rate_buckets.clear()
+
+
+def check_upload_rate_limit(
+    *,
+    reader_id: int | None = None,
+    client_ip: str | None = None,
+    now: float | None = None,
+) -> None:
+    """Enforce sliding-window upload rate limits per reader and per client IP."""
+    ts = time.monotonic() if now is None else float(now)
+    window = float(config.upload_rate_window_seconds())
+    cutoff = ts - window
+    reader_limit = config.upload_rate_limit_per_reader()
+    ip_limit = config.upload_rate_limit_per_ip()
+
+    checks: list[tuple[str, int]] = []
+    if reader_id is not None:
+        checks.append((f"reader:{reader_id}", reader_limit))
+    cleaned_ip = (client_ip or "").strip()
+    if cleaned_ip:
+        checks.append((f"ip:{cleaned_ip}", ip_limit))
+    if not checks:
+        return
+
+    with _upload_rate_lock:
+        if len(_upload_rate_buckets) > _MAX_TRACKED_RATE_BUCKETS:
+            stale_keys = [
+                k
+                for k, timestamps in _upload_rate_buckets.items()
+                if not timestamps or timestamps[-1] <= cutoff
+            ]
+            for k in stale_keys:
+                _upload_rate_buckets.pop(k, None)
+
+        pruned: dict[str, list[float]] = {}
+        for key, limit in checks:
+            active = [t for t in _upload_rate_buckets.get(key, ()) if t > cutoff]
+            if len(active) >= limit:
+                if active:
+                    _upload_rate_buckets[key] = active
+                else:
+                    _upload_rate_buckets.pop(key, None)
+                raise UploadValidationError(
+                    "Too many upload attempts in a short time. Please wait a few minutes and try again.",
+                    code="rate_limited",
+                )
+            pruned[key] = active
+
+        for key, active in pruned.items():
+            active.append(ts)
+            _upload_rate_buckets[key] = active
+
+
+def _validate_split_for_catalog(split: SplitResult) -> SplitResult:
+    if not split or not split.chapters:
+        raise UploadValidationError(
+            "No readable chapters were found in that file.",
+            code="no_chapters",
+        )
+    valid_chapters: list[ChapterDraft] = []
+    for ch in split.chapters:
+        body = (ch.body or "").strip()
+        if not body or ch.words <= 0:
+            continue
+        title = (squeeze(ch.title or "") or f"Section {len(valid_chapters) + 1}")[:MAX_METADATA_CHARS]
+        part = squeeze(ch.part)[:MAX_METADATA_CHARS] if ch.part and squeeze(ch.part) else None
+        valid_chapters.append(
+            ChapterDraft(
+                index=len(valid_chapters),
+                title=title,
+                body=body,
+                part=part,
+                source=ch.source,
+                notes=list(ch.notes),
+            )
+        )
+    if not valid_chapters:
+        raise UploadValidationError(
+            "No readable chapters were found in that file.",
+            code="no_chapters",
+        )
+    book_title = (squeeze(split.title or "") or "Book")[:MAX_METADATA_CHARS]
+    book_author = (
+        squeeze(split.author)[:MAX_METADATA_CHARS]
+        if split.author and squeeze(split.author)
+        else None
+    )
+    return SplitResult(
+        title=book_title,
+        author=book_author,
+        profile=split.profile,
+        chapters=valid_chapters,
+        skipped=list(split.skipped),
+    )
+
+
 def upsert_book_from_split(
     conn_or_split,
     split_arg: SplitResult | None = None,
@@ -125,13 +237,17 @@ def upsert_book_from_split(
     s3_key: str | None = None,
     uploaded_by=None,
     allow_replace: bool = False,
+    persist_original: Callable[[], str] | None = None,
+    rollback_original: Callable[[str], None] | None = None,
 ):
     from onechapter.reader.models import Book
 
     init_db()
-    split: SplitResult = split_arg if _is_conn(conn_or_split) else conn_or_split  # type: ignore[assignment]
+    raw_split: SplitResult = split_arg if _is_conn(conn_or_split) else conn_or_split  # type: ignore[assignment]
+    split = _validate_split_for_catalog(raw_split)
     source_sha256 = source_sha256 or None
     s3_key = s3_key or None
+    safe_source_filename = storage.safe_filename(filename) if filename else None
 
     if source_sha256 and not allow_replace:
         by_hash = Book.objects.filter(source_sha256=source_sha256).first()
@@ -141,50 +257,73 @@ def upsert_book_from_split(
     target_slug = slug or slugify(split.title)
     base = target_slug
     n = 2
+    persisted_new_key: str | None = None
 
-    with transaction.atomic():
-        while True:
-            existing = Book.objects.filter(slug=target_slug).first()
-            if not existing:
-                break
-            if allow_replace:
-                _replace_book_in_place(
-                    existing,
-                    split,
-                    filename=filename,
-                    language=language,
-                    source_sha256=source_sha256,
-                    s3_key=s3_key,
-                )
-                return get_book(existing.slug)
-            # Non-destructive upload: if canonical Tarasov or identical source filename/hash
-            # is already in the library, return the existing book without overwriting it.
-            if (
-                split.profile == "tarasov"
-                and existing.slug == "tehnologiya-zhizni"
-            ) or (
-                source_sha256 and existing.source_sha256 == source_sha256
-            ) or (
-                filename
-                and existing.source_filename == filename
-                and existing.title == split.title
-            ):
-                return get_book(existing.slug)
-            target_slug = f"{base}-{n}"
-            n += 1
+    try:
+        with transaction.atomic():
+            if source_sha256 and not allow_replace:
+                by_hash = Book.objects.filter(source_sha256=source_sha256).first()
+                if by_hash:
+                    return get_book(by_hash.slug)
 
-        book = Book.objects.create(
-            slug=target_slug,
-            title=split.title,
-            author=split.author,
-            language=language,
-            profile=split.profile,
-            source_filename=filename,
-            source_sha256=source_sha256,
-            s3_key=s3_key,
-            uploaded_by=uploaded_by,
-        )
-        _insert_chapters(book, split)
+            while True:
+                existing = Book.objects.filter(slug=target_slug).first()
+                if not existing:
+                    break
+                if allow_replace:
+                    _replace_book_in_place(
+                        existing,
+                        split,
+                        filename=safe_source_filename,
+                        language=language,
+                        source_sha256=source_sha256,
+                        s3_key=s3_key,
+                    )
+                    if persist_original is not None:
+                        persisted_new_key = persist_original()
+                        if persisted_new_key and existing.s3_key != persisted_new_key:
+                            existing.s3_key = persisted_new_key
+                            existing.save(update_fields=["s3_key"])
+                    return get_book(existing.slug)
+                # Non-destructive upload: if canonical Tarasov or identical source filename/hash
+                # is already in the library, return the existing book without overwriting it.
+                if (
+                    split.profile == "tarasov"
+                    and existing.slug == "tehnologiya-zhizni"
+                ) or (
+                    source_sha256 and existing.source_sha256 == source_sha256
+                ) or (
+                    safe_source_filename
+                    and existing.source_filename == safe_source_filename
+                    and existing.title == split.title
+                ):
+                    return get_book(existing.slug)
+                target_slug = f"{base}-{n}"
+                n += 1
+
+            book = Book.objects.create(
+                slug=target_slug,
+                title=split.title,
+                author=split.author,
+                language=language,
+                profile=split.profile,
+                source_filename=safe_source_filename,
+                source_sha256=source_sha256,
+                s3_key=s3_key,
+                uploaded_by=uploaded_by,
+            )
+            _insert_chapters(book, split)
+            if persist_original is not None:
+                persisted_new_key = persist_original()
+                if persisted_new_key and book.s3_key != persisted_new_key:
+                    book.s3_key = persisted_new_key
+                    book.save(update_fields=["s3_key"])
+    except Exception:
+        if persisted_new_key and rollback_original is not None:
+            if not Book.objects.filter(s3_key=persisted_new_key).exists():
+                rollback_original(persisted_new_key)
+        raise
+
     return get_book(book.slug)
 
 
@@ -316,7 +455,9 @@ def ingest_file(
 
     init_db()
     path = Path(path)
+    validate_source_file(path)
     raw_bytes = path.read_bytes()
+    safe_name = storage.safe_filename(path.name)
     digest = storage.sha256_bytes(raw_bytes)
 
     if not allow_replace:
@@ -324,33 +465,40 @@ def ingest_file(
         if existing_hash:
             return get_book(existing_hash.slug)
 
-    _, s3_key, temp_or_local = storage.store_original(
-        raw_bytes,
-        path.name,
-        s3_client=s3_client,
-    )
-    cleanup_temp = temp_or_local != path and config.s3_bucket() != ""
-    try:
-        extracted = extract_path(path if path.exists() else temp_or_local)
-        split = split_extracted(extracted)
-        if not split.chapters:
-            raise ValueError("No chapters found in that file.")
-        language = "ru" if split.profile == "tarasov" else None
-        slug = "tehnologiya-zhizni" if split.profile == "tarasov" else None
-        return upsert_book_from_split(
-            conn,
-            split,
-            slug=slug,
-            filename=path.name,
-            language=language,
-            source_sha256=digest,
-            s3_key=s3_key,
-            uploaded_by=uploaded_by,
-            allow_replace=allow_replace,
+    # Extract, validate archive/markup safety, and split into non-empty chapters
+    # strictly BEFORE storing originals in S3/uploads or creating DB rows.
+    extracted = extract_path(path)
+    split = _validate_split_for_catalog(split_extracted(extracted))
+
+    planned_key = storage.build_original_key(digest, safe_name)
+    language = "ru" if split.profile == "tarasov" else None
+    slug = "tehnologiya-zhizni" if split.profile == "tarasov" else None
+
+    def _persist() -> str:
+        _, stored_key, _ = storage.store_original(
+            raw_bytes,
+            safe_name,
+            s3_client=s3_client,
+            create_temp=False,
         )
-    finally:
-        if cleanup_temp and temp_or_local.exists():
-            temp_or_local.unlink(missing_ok=True)
+        return stored_key
+
+    def _rollback(stored_key: str) -> None:
+        storage.delete_original(stored_key, s3_client=s3_client)
+
+    return upsert_book_from_split(
+        conn,
+        split,
+        slug=slug,
+        filename=safe_name,
+        language=language,
+        source_sha256=digest,
+        s3_key=planned_key,
+        uploaded_by=uploaded_by,
+        allow_replace=allow_replace,
+        persist_original=_persist,
+        rollback_original=_rollback,
+    )
 
 
 def reprocess_book(slug: str, *, s3_client=None):
@@ -366,9 +514,7 @@ def reprocess_book(slug: str, *, s3_client=None):
     local_path, should_cleanup = storage.fetch_original_to_temp(key, s3_client=s3_client)
     try:
         extracted = extract_path(local_path)
-        split = split_extracted(extracted)
-        if not split.chapters:
-            raise ValueError("No chapters found in that file.")
+        split = _validate_split_for_catalog(split_extracted(extracted))
         language = book.language or ("ru" if split.profile == "tarasov" else None)
         return upsert_book_from_split(
             None,

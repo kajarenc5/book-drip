@@ -12,12 +12,22 @@
         <input type="file" name="file" required accept=".mobi,.azw,.azw3,.epub,.fb2,.txt,.html,.md" onchange="this.form.submit()">
       </label>
     </form>
-    {% if notice == 'fail' %}
-      <p class="flash">That file could not be split. Try EPUB or HTML if the MOBI is encrypted.</p>
-    {% elif notice == 'empty' %}
+    {% if notice == 'empty' %}
       <p class="flash">The upload was empty.</p>
     {% elif notice == 'too_large' %}
       <p class="flash">That file is too large (maximum 25 MB).</p>
+    {% elif notice == 'unsupported' %}
+      <p class="flash">Unsupported file format. Upload a .mobi, .azw, .azw3, .epub, .fb2, .html, .txt, or .md book.</p>
+    {% elif notice == 'unsafe' %}
+      <p class="flash">That file was rejected because it contains unsafe archive entries, excessive compression, or disallowed XML entities.</p>
+    {% elif notice == 'corrupt' %}
+      <p class="flash">That file could not be read. Make sure it is a valid, unencrypted book file.</p>
+    {% elif notice == 'no_chapters' %}
+      <p class="flash">No readable chapters were found in that file.</p>
+    {% elif notice == 'rate_limited' %}
+      <p class="flash">Too many upload attempts right now. Please wait a few minutes and try again.</p>
+    {% elif notice == 'fail' %}
+      <p class="flash">That file could not be split. Try EPUB or HTML if the MOBI is encrypted.</p>
     {% endif %}
   </section>
   <ol class="shelf">
