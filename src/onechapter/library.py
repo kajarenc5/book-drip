@@ -591,12 +591,14 @@ def get_or_create_channel_reader(
     *,
     handle: str | None = None,
     invite_code: str | None = None,
+    timezone: str | None = None,
 ):
     """Resolve or create a Reader for any messaging/login channel (telegram, signal, whatsapp, email)."""
     from onechapter.reader.models import ChannelIdentity, Reader
 
     init_db()
     ext_str = str(external_id)
+    valid_tz = timezone.strip() if (timezone and is_valid_timezone(timezone)) else None
     ident = (
         ChannelIdentity.objects.select_related("reader", "reader__user")
         .filter(channel=channel, external_id=ext_str)
@@ -626,6 +628,9 @@ def get_or_create_channel_reader(
         ):
             reader.is_allowed = True
             updated_fields.append("is_allowed")
+            if valid_tz and reader.timezone == DEFAULT_TIMEZONE:
+                reader.timezone = valid_tz
+                updated_fields.append("timezone")
             if awaiting_invite:
                 meta = dict(ident.metadata or {})
                 meta.pop("awaiting_invite", None)
@@ -687,13 +692,19 @@ def get_or_create_channel_reader(
 
         if unlinked_reader is not None:
             reader = unlinked_reader
+            unlinked_updates: list[str] = []
             if name and (not reader.display_name or reader.display_name == "Local reader"):
                 reader.display_name = name
-                reader.save(update_fields=["display_name"])
+                unlinked_updates.append("display_name")
+            if valid_tz and reader.timezone == DEFAULT_TIMEZONE and not reader.plans.exists():
+                reader.timezone = valid_tz
+                unlinked_updates.append("timezone")
+            if unlinked_updates:
+                reader.save(update_fields=unlinked_updates)
         else:
             reader = Reader.objects.create(
                 display_name=name or "",
-                timezone=DEFAULT_TIMEZONE,
+                timezone=valid_tz or DEFAULT_TIMEZONE,
                 delivery_hhmm=DEFAULT_DELIVERY,
                 is_allowed=is_allowed,
                 is_blocked=False,
@@ -720,6 +731,7 @@ def get_or_create_telegram_reader(
     *,
     handle: str | None = None,
     invite_code: str | None = None,
+    timezone: str | None = None,
 ):
     if _is_conn(conn_or_tg_id):
         tg_id = telegram_id_or_name
@@ -733,6 +745,7 @@ def get_or_create_telegram_reader(
         actual_name,
         handle=handle,
         invite_code=invite_code,
+        timezone=timezone,
     )
 
 
@@ -758,6 +771,7 @@ def update_reader(
     timezone: str | None = None,
     delivery_hhmm: str | None = None,
     name: str | None = None,
+    strict: bool = False,
 ) -> None:
     from onechapter.reader.models import Reader
 
@@ -766,15 +780,73 @@ def update_reader(
     reader = Reader.objects.filter(id=actual_id).first()
     if not reader:
         return
-    if timezone and is_valid_timezone(timezone):
-        reader.timezone = timezone.strip()
-    if delivery_hhmm:
+    if timezone is not None:
+        if is_valid_timezone(timezone):
+            reader.timezone = timezone.strip()
+        elif strict:
+            raise ValueError(f"Invalid IANA timezone: {timezone!r}")
+    if delivery_hhmm is not None:
         normalized = normalize_hhmm(delivery_hhmm)
         if normalized:
             reader.delivery_hhmm = normalized
+        elif strict:
+            raise ValueError(f"Invalid delivery time: {delivery_hhmm!r}")
     if name is not None:
         reader.display_name = name
     reader.save()
+
+
+def get_telegram_identity(reader_id: int):
+    from onechapter.reader.models import ChannelIdentity
+
+    init_db()
+    return ChannelIdentity.objects.filter(reader_id=reader_id, channel="telegram").first()
+
+
+def set_telegram_delivery_enabled(
+    reader_id: int | None = None,
+    *,
+    telegram_id: int | str | None = None,
+    enabled: bool = True,
+    reason: str | None = None,
+) -> bool:
+    """Enable or disable daily Telegram push for a reader or Telegram chat ID.
+
+    Returns True when at least one Telegram ChannelIdentity had its delivery state changed.
+    """
+    from onechapter.reader.models import ChannelIdentity
+
+    init_db()
+    qs = ChannelIdentity.objects.filter(channel="telegram")
+    if telegram_id is not None and reader_id is not None:
+        qs = qs.filter(Q(reader_id=reader_id) | Q(external_id=str(telegram_id)))
+    elif telegram_id is not None:
+        qs = qs.filter(external_id=str(telegram_id))
+    elif reader_id is not None:
+        qs = qs.filter(reader_id=reader_id)
+    else:
+        return False
+
+    changed = False
+    for ident in qs:
+        fields: list[str] = []
+        if ident.is_delivery_enabled != bool(enabled):
+            ident.is_delivery_enabled = bool(enabled)
+            fields.append("is_delivery_enabled")
+            changed = True
+        meta = dict(ident.metadata or {})
+        if enabled:
+            if "delivery_disabled_reason" in meta:
+                meta.pop("delivery_disabled_reason", None)
+                ident.metadata = meta
+                fields.append("metadata")
+        elif reason and meta.get("delivery_disabled_reason") != reason:
+            meta["delivery_disabled_reason"] = reason
+            ident.metadata = meta
+            fields.append("metadata")
+        if fields:
+            ident.save(update_fields=fields)
+    return changed
 
 
 def get_plan(conn_or_reader_id, reader_id_or_book_id: int, book_id: int | None = None):
@@ -835,7 +907,7 @@ def set_reader_blocked(reader_id: int, blocked: bool = True) -> None:
 
 
 def list_active_plans(conn=None):
-    from onechapter.reader.models import ChannelIdentity, Plan
+    from onechapter.reader.models import ChannelIdentity, Chapter, Plan
 
     init_db()
     plans = list(
@@ -850,7 +922,10 @@ def list_active_plans(conn=None):
         .filter(Q(reader__user__isnull=True) | Q(reader__user__is_active=True))
         .distinct()
     )
-    reader_ids = [p.reader_id for p in plans]
+    if not plans:
+        return []
+
+    reader_ids = {p.reader_id for p in plans}
     tg_map = {
         ci.reader_id: int(ci.external_id)
         for ci in ChannelIdentity.objects.filter(
@@ -860,9 +935,20 @@ def list_active_plans(conn=None):
         )
         if ci.external_id.lstrip("-").isdigit()
     }
+    book_ids = {p.book_id for p in plans}
+    chapter_counts = {
+        row["book_id"]: row["total"]
+        for row in Chapter.objects.filter(book_id__in=book_ids)
+        .values("book_id")
+        .annotate(total=Count("id"))
+    }
+    active: list[Plan] = []
     for p in plans:
         p.reader._prefetched_telegram_id = tg_map.get(p.reader_id)
-    return [p for p in plans if p.telegram_id is not None]
+        p._prefetched_chapter_count = chapter_counts.get(p.book_id, 0)
+        if p.telegram_id is not None:
+            active.append(p)
+    return active
 
 
 def chapter_count(conn_or_book_id, book_id: int | None = None) -> int:
@@ -876,7 +962,8 @@ def chapter_count(conn_or_book_id, book_id: int | None = None) -> int:
 def state_for_plan(conn_or_plan, plan_row=None, now: datetime | None = None) -> PlanState:
     init_db()
     actual_plan = plan_row if _is_conn(conn_or_plan) else conn_or_plan
-    total = chapter_count(None, actual_plan["book_id"])
+    prefetched_total = getattr(actual_plan, "_prefetched_chapter_count", None)
+    total = prefetched_total if prefetched_total is not None else chapter_count(None, actual_plan["book_id"])
     return plan_state(actual_plan, total, now)
 
 
@@ -1063,6 +1150,11 @@ def add_reflection(
         pos = int(plan_id_or_pos)
         text = str(position_or_body)
 
+    cleaned = text.strip()
+    max_chars = config.max_reflection_chars()
+    if len(cleaned) > max_chars:
+        raise ValueError(f"Reflection exceeds maximum length of {max_chars} characters.")
+
     plan = Plan.objects.select_related("reader", "book").get(id=p_id)
     chapter = Chapter.objects.filter(book_id=plan.book_id, position=pos).first()
     chapter_key = chapter.chapter_key if chapter else f"pos-{pos}"
@@ -1078,7 +1170,7 @@ def add_reflection(
         chapter_title_snapshot=chapter_title,
         kind=kind,
         source_channel=source_channel,
-        body=text.strip(),
+        body=cleaned,
         audio_s3_key=audio_s3_key,
         audio_mime_type=audio_mime_type,
         audio_duration_sec=audio_duration_sec,

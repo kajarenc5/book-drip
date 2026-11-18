@@ -14,17 +14,48 @@
     {% elif notice == 'blocked' %}
       <p class="flash">Access to One Chapter has been disabled for this account.</p>
     {% endif %}
+    <script>
+      (function () {
+        try {
+          var detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          if (detectedTz) {
+            document.cookie = "onechapter_tz=" + encodeURIComponent(detectedTz) + "; path=/; max-age=86400; SameSite=Lax";
+          }
+        } catch (e) {}
+      })();
+    </script>
     {% if bot_username %}
-      <div class="actions">
-        <script async src="https://telegram.org/js/telegram-widget.js?22"
-                data-telegram-login="{{ bot_username }}"
-                data-size="large"
-                data-auth-url="{{ public_url }}/auth/telegram"
-                data-request-access="write"></script>
+      <div class="actions" id="telegram-login-container">
+        <script>
+          (function () {
+            var authUrl = "{{ public_url|escapejs }}/auth/telegram";
+            try {
+              var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+              if (tz) {
+                authUrl += (authUrl.indexOf("?") === -1 ? "?" : "&") + "tz=" + encodeURIComponent(tz);
+              }
+            } catch (e) {}
+            var s = document.createElement("script");
+            s.async = true;
+            s.src = "https://telegram.org/js/telegram-widget.js?22";
+            s.setAttribute("data-telegram-login", "{{ bot_username|escapejs }}");
+            s.setAttribute("data-size", "large");
+            s.setAttribute("data-auth-url", authUrl);
+            s.setAttribute("data-request-access", "write");
+            document.getElementById("telegram-login-container").appendChild(s);
+          })();
+        </script>
+        <noscript>
+          <script async src="https://telegram.org/js/telegram-widget.js?22"
+                  data-telegram-login="{{ bot_username }}"
+                  data-size="large"
+                  data-auth-url="{{ public_url }}/auth/telegram"
+                  data-request-access="write"></script>
+        </noscript>
       </div>
-      <p class="meta">Or open <a href="https://t.me/{{ bot_username }}">@{{ bot_username }}</a> on Telegram and send <code>/login</code> for a one-tap sign-in link.</p>
+      <p class="meta">Or open <a href="https://t.me/{{ bot_username }}">@{{ bot_username }}</a> on Telegram, press <strong>Start</strong>, and send <code>/login</code> for a one-tap sign-in link.</p>
     {% else %}
-      <p class="meta">Open the One Chapter Telegram bot and send <code>/login</code> to receive a one-tap sign-in link.</p>
+      <p class="meta">Open <a href="https://t.me/one_chapter_bot">@one_chapter_bot</a> on Telegram, press <strong>Start</strong>, and send <code>/login</code> to receive a one-tap sign-in link.</p>
     {% endif %}
   </section>
 {% endblock %}

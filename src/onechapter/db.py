@@ -25,6 +25,7 @@ def current_db_target() -> str:
         for k in ("ENGINE", "NAME", "USER", "PASSWORD", "HOST", "PORT")
     )
     if changed:
+        _migrated_targets.clear()
         conn.close()
         for k, v in desired.items():
             db_cfg[k] = v
@@ -36,10 +37,14 @@ def current_db_target() -> str:
     return f"{db_cfg.get('HOST')}:{db_cfg.get('PORT')}/{db_cfg.get('NAME')}"
 
 
+def reset_db_init_cache() -> None:
+    _migrated_targets.clear()
+
+
 def init_db() -> None:
     """Ensure PostgreSQL is running and apply Django migrations if not yet migrated in this process."""
     target = current_db_target()
-    if target in _migrated_targets and _has_core_tables():
+    if target in _migrated_targets:
         return
     call_command("migrate", verbosity=0, interactive=False)
     _migrated_targets.add(target)

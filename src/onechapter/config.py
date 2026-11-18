@@ -23,6 +23,14 @@ TELEGRAM_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 UPLOAD_RATE_LIMIT_PER_READER = 5
 UPLOAD_RATE_LIMIT_PER_IP = 10
 UPLOAD_RATE_WINDOW_SECONDS = 600
+MAX_REFLECTION_CHARS = 10_000
+
+
+def max_reflection_chars() -> int:
+    return max(
+        1,
+        int(os.environ.get("ONECHAPTER_MAX_REFLECTION_CHARS", str(MAX_REFLECTION_CHARS))),
+    )
 
 
 def max_upload_bytes() -> int:

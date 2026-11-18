@@ -5,7 +5,7 @@
     <section class="hero">
       <p class="kicker">Slow reading</p>
       <h1>One chapter a day, from books that should not be rushed.</h1>
-      <p class="lede">Tarasov’s <em>Технология жизни</em> is built from short titled essays. Machiavelli’s <em>Prince</em> is twenty-six arguments. This companion sends you one, then locks tomorrow until tomorrow.</p>
+      <p class="lede">Short chapters, essays, and arguments meant to be read one morning at a time. Choose a book from the library or upload your own edition — today’s chapter opens now, and tomorrow stays locked until tomorrow.</p>
       <div class="actions">
         <a class="btn" href="/library">Open the library</a>
         <label class="btn ghost file">
@@ -50,7 +50,7 @@
       <form class="note" method="post" action="/read/{{ plan.slug }}/{{ chapter.position }}/note">
         {% csrf_token %}
         <label for="note">A line to keep</label>
-        <textarea id="note" name="body" rows="3" placeholder="What does this ask of today?"></textarea>
+        <textarea id="note" name="body" rows="3" maxlength="{{ max_reflection_chars|default:10000 }}" placeholder="What does this ask of today?"></textarea>
         <button class="btn small" type="submit">Keep</button>
       </form>
       {% if notes %}

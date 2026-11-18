@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from functools import lru_cache
+from zoneinfo import ZoneInfo, available_timezones
 
 from onechapter.config import DEFAULT_DELIVERY, DEFAULT_TIMEZONE
 
@@ -59,6 +60,20 @@ def is_valid_timezone(tz_name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+@lru_cache(maxsize=1)
+def list_iana_timezones() -> tuple[str, ...]:
+    zones = {
+        tz
+        for tz in available_timezones()
+        if (tz == "UTC" or "/" in tz)
+        and not tz.startswith(("posix/", "right/", "Etc/", "SystemV/"))
+        and is_valid_timezone(tz)
+    }
+    zones.add(DEFAULT_TIMEZONE)
+    zones.add("UTC")
+    return tuple(sorted(zones))
 
 
 def _safe_zoneinfo(tz_name: str) -> ZoneInfo:

@@ -59,9 +59,11 @@ def data_dir(tmp_path, monkeypatch):
             "channel_identities, readers, settings, auth_user RESTART IDENTITY CASCADE;"
         )
 
+    from onechapter.bot.handlers import reset_delivery_runtime_state
     from onechapter.library import reset_upload_rate_limits
     from onechapter.reader import middleware
 
     reset_upload_rate_limits()
+    reset_delivery_runtime_state()
     middleware._ready.clear()
     return tmp_path

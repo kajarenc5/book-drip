@@ -22,6 +22,12 @@
         <a href="/" {% if nav_today %}aria-current="page"{% endif %}>Today</a>
         <a href="/library" {% if nav_library %}aria-current="page"{% endif %}>Library</a>
         <a href="/settings" {% if nav_settings %}aria-current="page"{% endif %}>Settings</a>
+        {% if request.user.is_authenticated %}
+          <form class="nav-logout" method="post" action="/logout">
+            {% csrf_token %}
+            <button type="submit">Sign out</button>
+          </form>
+        {% endif %}
       </nav>
     </header>
     <main>

@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from asgiref.sync import sync_to_async
+from telegram.error import BadRequest, Forbidden, RetryAfter
 
 from onechapter.auth import create_magic_login_token
-from onechapter.config import access_mode, public_url, telegram_max_upload_bytes
+from onechapter.config import (
+    access_mode,
+    max_reflection_chars,
+    public_url,
+    telegram_max_upload_bytes,
+)
 from onechapter.ingest.extract import SUPPORTED_SUFFIXES, UploadValidationError
 from onechapter.library import (
     active_plan_for_reader,
     add_reflection,
-    already_delivered,
     chapter_count,
     check_upload_rate_limit,
     cleanup_staged_upload,
@@ -26,6 +32,7 @@ from onechapter.library import (
     record_delivery,
     resume_plan,
     save_upload,
+    set_telegram_delivery_enabled,
     start_book,
     state_for_plan,
     update_reader,
@@ -41,6 +48,7 @@ HELP = """One chapter a day. No more.
 /yesterday — the previous one
 /progress — where you are
 /pause and /resume — freeze the calendar
+/stop — turn off daily Telegram messages
 /time 08:00 — morning delivery
 /tz Europe/Moscow — your timezone
 /books — library
@@ -48,7 +56,7 @@ HELP = """One chapter a day. No more.
 /login — open the web reader signed in as you
 
 Write any note in this chat to save a reflection on today's chapter.
-Send a .mobi, .epub, or .fb2 file to add a book to the library. For Tarasov's Технология жизни, the bot splits the short titled essays, not the four large parts.
+Send an .epub, .mobi, .fb2, or .txt file to add a book to the library.
 """
 
 INVITE_ONLY_MESSAGE = (
@@ -99,12 +107,29 @@ async def _require_allowed_reader(update, invite_code: str | None = None):
 
 async def cmd_start(update, context) -> None:
     arg = context.args[0].strip() if getattr(context, "args", None) else None
-    reader = await _require_allowed_reader(update, invite_code=arg)
+    invite_arg = None if arg == "connect" else arg
+    reader = await _require_allowed_reader(update, invite_code=invite_arg)
     if not reader:
         return
+    await sync_to_async(set_telegram_delivery_enabled)(reader.id, enabled=True)
     await update.message.reply_text(
         "This is a slow-reading companion.\n\n"
         "It will send you one short, dense chapter each day, then wait.\n\n" + HELP
+    )
+
+
+async def cmd_stop(update, context) -> None:
+    reader = await _require_allowed_reader(update)
+    if not reader:
+        return
+    await sync_to_async(set_telegram_delivery_enabled)(
+        reader.id,
+        enabled=False,
+        reason="user_stopped",
+    )
+    await update.message.reply_text(
+        "Daily Telegram delivery is off. You can still read in the web reader, "
+        "or send /start or /resume anytime to turn daily messages back on."
     )
 
 
@@ -132,7 +157,7 @@ async def cmd_books(update, context) -> None:
         return
     books = await sync_to_async(list_books)()
     if not books:
-        await update.message.reply_text("The library is empty. Send a .mobi file to begin.")
+        await update.message.reply_text("The library is empty. Send an .epub, .mobi, .fb2, or .txt file to begin.")
         return
     lines = []
     for book in books:
@@ -172,11 +197,8 @@ def _prepare_begin(reader_id: int):
         book = get_book(None, plan["slug"])
         state = start_book(None, reader_id, plan["book_id"])
         return ("ok", _build_chapter_delivery(state, book, state.today_position, channel="telegram"))
-    tarasov = next((b for b in books if b["profile"] == "tarasov"), None)
-    chosen = tarasov or next(
-        (b for b in books if b["slug"] == "slow-reading"),
-        books[0] if books else None,
-    )
+    slow = next((b for b in books if b["slug"] == "slow-reading"), None)
+    chosen = slow or (books[0] if books else None)
     if not chosen:
         return ("empty", None)
     state = start_book(None, reader_id, chosen["id"])
@@ -187,9 +209,19 @@ async def cmd_begin(update, context) -> None:
     reader = await _require_allowed_reader(update)
     if not reader:
         return
+    slug = " ".join(context.args).strip() if getattr(context, "args", None) else ""
+    if slug:
+        prepared_slug = await _prepare_read(reader.id, slug)
+        if prepared_slug is None:
+            await update.message.reply_text("No book with that name. See /books.")
+            return
+        await _dispatch_prepared(update, prepared_slug)
+        return
     status, prepared = await _prepare_begin(reader.id)
     if status == "empty":
-        await update.message.reply_text("Send your .mobi of Технология жизни first.")
+        await update.message.reply_text(
+            "The library is empty. Upload an .epub, .mobi, .fb2, or .txt book first."
+        )
         return
     await _dispatch_prepared(update, prepared)
 
@@ -244,20 +276,29 @@ async def cmd_pause(update, context) -> None:
 
 
 @sync_to_async
-def _do_resume(reader_id: int) -> bool:
+def _do_resume(reader_id: int) -> str:
+    delivery_re_enabled = set_telegram_delivery_enabled(reader_id, enabled=True)
     plan = active_plan_for_reader(None, reader_id)
-    if not plan:
-        return False
-    resume_plan(None, plan["id"])
-    return True
+    if plan and plan["status"] == "paused":
+        resume_plan(None, plan["id"])
+        return "plan"
+    if delivery_re_enabled:
+        return "delivery"
+    if plan:
+        return "already_active"
+    return "nothing"
 
 
 async def cmd_resume(update, context) -> None:
     reader = await _require_allowed_reader(update)
     if not reader:
         return
-    if not await _do_resume(reader.id):
+    outcome = await _do_resume(reader.id)
+    if outcome == "nothing":
         await update.message.reply_text("Nothing to resume.")
+        return
+    if outcome == "delivery":
+        await update.message.reply_text("Resumed. Daily Telegram delivery is back on.")
         return
     await update.message.reply_text("Resumed. Today's chapter is the one you left on.")
 
@@ -407,6 +448,12 @@ async def on_text_reflection(update, context) -> None:
     reader = await _require_allowed_reader(update)
     if not reader:
         return
+    limit = max_reflection_chars()
+    if len(body) > limit:
+        await update.message.reply_text(
+            f"That note is too long (maximum {limit:,} characters). Keep a shorter passage or reflection."
+        )
+        return
     status, info = await _save_telegram_reflection(reader.id, body)
     if status != "ok" or not info:
         await update.message.reply_text("Start a book with /begin first to save chapter notes.")
@@ -477,24 +524,114 @@ async def _dispatch_prepared(update, prepared) -> None:
         await sync_to_async(record_delivery)(None, plan_id, local_date, position, channel)
 
 
+_PERMANENT_BAD_REQUEST_PHRASES = (
+    "chat not found",
+    "user not found",
+    "peer_id_invalid",
+    "chat_id is empty",
+    "user is deactivated",
+    "bot was blocked",
+    "bot can't initiate conversation",
+    "have no rights to send a message",
+)
+_MAX_TRACKED_PARTIAL_DELIVERIES = 4_096
+_partial_chunk_progress: dict[tuple[int, str], int] = {}
+_retry_after_until_ts: float = 0.0
+
+
+def reset_delivery_runtime_state() -> None:
+    global _retry_after_until_ts
+    _partial_chunk_progress.clear()
+    _retry_after_until_ts = 0.0
+
+
+def _is_permanent_chat_error(exc: BaseException) -> bool:
+    if isinstance(exc, Forbidden):
+        return True
+    if isinstance(exc, BadRequest):
+        msg = str(exc).lower()
+        return any(phrase in msg for phrase in _PERMANENT_BAD_REQUEST_PHRASES)
+    return False
+
+
+def _extract_retry_after_seconds(exc: RetryAfter) -> float:
+    raw = getattr(exc, "_retry_after", None)
+    if raw is None:
+        raw = exc.retry_after
+    if isinstance(raw, timedelta):
+        return max(0.0, raw.total_seconds())
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 @sync_to_async
 def _collect_due_deliveries(now: datetime | None = None):
+    from onechapter.reader.models import Chapter, Delivery
+
     plans = list_active_plans()
-    due = []
+    if not plans:
+        return []
+
+    candidates = []
     for plan in plans:
         try:
             state = state_for_plan(None, plan, now)
             if not due_for_delivery(state, now):
                 continue
-            if already_delivered(None, state.plan_id, state.today.isoformat(), "telegram"):
+            if state.today_position is None:
                 continue
+            candidates.append((plan, state))
+        except Exception:
+            log.exception("Failed to evaluate plan state for plan %s", getattr(plan, "id", None))
+
+    if not candidates:
+        return []
+
+    candidate_plan_ids = [state.plan_id for _, state in candidates]
+    candidate_dates = {state.today for _, state in candidates}
+    delivered_pairs = set(
+        Delivery.objects.filter(
+            plan_id__in=candidate_plan_ids,
+            local_date__in=candidate_dates,
+            channel="telegram",
+        ).values_list("plan_id", "local_date")
+    )
+
+    pending = [
+        (plan, state)
+        for plan, state in candidates
+        if (state.plan_id, state.today) not in delivered_pairs
+    ]
+    if not pending:
+        return []
+
+    due_book_ids = {plan["book_id"] for plan, _ in pending}
+    needed_positions: set[int] = set()
+    for _, state in pending:
+        assert state.today_position is not None
+        needed_positions.add(state.today_position)
+        needed_positions.add(state.today_position + 1)
+
+    chapters_by_book_pos = {
+        (ch.book_id, ch.position): ch
+        for ch in Chapter.objects.filter(
+            book_id__in=due_book_ids,
+            position__in=needed_positions,
+        )
+    }
+
+    due = []
+    for plan, state in pending:
+        try:
             position = state.today_position
             if position is None:
                 continue
-            chapter = get_chapter(None, plan["book_id"], position)
+            chapter = chapters_by_book_pos.get((plan["book_id"], position))
             if chapter is None:
                 continue
-            nxt = get_chapter(None, plan["book_id"], position + 1)
+            nxt = chapters_by_book_pos.get((plan["book_id"], position + 1))
             messages = format_chapter_messages(
                 day=position + 1,
                 total=state.total,
@@ -511,20 +648,75 @@ def _collect_due_deliveries(now: datetime | None = None):
 
 
 async def send_due_chapters(bot, now: datetime | None = None) -> int:
+    global _retry_after_until_ts
+
+    effective_ts = now.timestamp() if now is not None else time.time()
+    if effective_ts < _retry_after_until_ts:
+        return 0
+
     due = await _collect_due_deliveries(now)
+    if len(_partial_chunk_progress) > _MAX_TRACKED_PARTIAL_DELIVERIES:
+        active_keys = {(state.plan_id, state.today.isoformat()) for _, state, _, _ in due}
+        for stale_key in list(_partial_chunk_progress):
+            if stale_key not in active_keys:
+                _partial_chunk_progress.pop(stale_key, None)
+
     sent = 0
     for telegram_id, state, messages, position in due:
+        local_date_iso = state.today.isoformat()
+        progress_key = (state.plan_id, local_date_iso)
+        start_idx = _partial_chunk_progress.get(progress_key, 0)
+        if start_idx >= len(messages):
+            start_idx = 0
         try:
-            for text in messages:
-                await bot.send_message(chat_id=telegram_id, text=text, parse_mode="HTML")
+            for idx in range(start_idx, len(messages)):
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=messages[idx],
+                    parse_mode="HTML",
+                )
+                _partial_chunk_progress[progress_key] = idx + 1
+            _partial_chunk_progress.pop(progress_key, None)
             await sync_to_async(record_delivery)(
                 None,
                 state.plan_id,
-                state.today.isoformat(),
+                local_date_iso,
                 position,
                 "telegram",
             )
             sent += 1
+        except RetryAfter as exc:
+            delay = _extract_retry_after_seconds(exc)
+            _retry_after_until_ts = effective_ts + delay
+            log.warning(
+                "Telegram RetryAfter (%.1fs) while delivering to telegram_id=%s (plan=%s); deferring remaining batch",
+                delay,
+                telegram_id,
+                state.plan_id,
+            )
+            break
+        except (Forbidden, BadRequest) as exc:
+            if _is_permanent_chat_error(exc):
+                _partial_chunk_progress.pop(progress_key, None)
+                await sync_to_async(set_telegram_delivery_enabled)(
+                    state.reader_id,
+                    telegram_id=telegram_id,
+                    enabled=False,
+                    reason="telegram_unreachable",
+                )
+                log.warning(
+                    "Disabled Telegram delivery for unreachable chat telegram_id=%s (plan=%s): %s",
+                    telegram_id,
+                    state.plan_id,
+                    exc,
+                )
+            else:
+                log.warning(
+                    "Could not deliver chapter to telegram_id=%s (plan=%s)",
+                    telegram_id,
+                    state.plan_id,
+                    exc_info=True,
+                )
         except Exception:
             log.warning(
                 "Could not deliver chapter to telegram_id=%s (plan=%s)",

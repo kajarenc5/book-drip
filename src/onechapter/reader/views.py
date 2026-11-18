@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 from pathlib import Path
+from urllib.parse import unquote
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -16,12 +17,14 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from onechapter.auth import verify_magic_login_token, verify_telegram_login_data
 from onechapter.bot.runtime import runtime as telegram_runtime
 from onechapter.config import (
+     DEFAULT_TIMEZONE,
     access_mode,
     allowed_telegram_ids,
     env_bot_username,
     invite_code as configured_invite_code,
     is_access_allowed,
     is_local_single_user_dev,
+    max_reflection_chars,
     max_upload_bytes,
     operator_telegram_ids,
 )
@@ -38,6 +41,7 @@ from onechapter.library import (
     get_chapter,
     get_or_create_telegram_reader,
     get_plan,
+    get_telegram_identity,
     ingest_file,
     list_books,
     pause_plan,
@@ -46,11 +50,13 @@ from onechapter.library import (
     resume_plan,
     save_upload,
     set_bot_token,
+    set_telegram_delivery_enabled,
     start_book,
     state_for_plan,
     update_reader,
 )
 from onechapter.reader.models import ChannelIdentity, Reader
+from onechapter.reading import is_valid_timezone, list_iana_timezones, normalize_hhmm
 
 log = logging.getLogger(__name__)
 
@@ -116,11 +122,31 @@ def login_page(request):
     )
 
 
+def _extract_browser_timezone(request) -> str | None:
+    candidates = (
+        request.POST.get("tz"),
+        request.GET.get("tz"),
+        request.COOKIES.get("onechapter_tz"),
+    )
+    for raw in candidates:
+        if not raw:
+            continue
+        cleaned = unquote(str(raw)).strip()
+        if cleaned and is_valid_timezone(cleaned):
+            return cleaned
+    return None
+
+
 @require_http_methods(["GET", "POST"])
 def telegram_auth(request):
     params = request.POST if request.method == "POST" else request.GET
+    auth_params = {
+        k: v
+        for k, v in params.items()
+        if k not in {"tz", "csrfmiddlewaretoken"}
+    }
     token = bot_token()
-    verified = verify_telegram_login_data(params, token)
+    verified = verify_telegram_login_data(auth_params, token)
     if not verified:
         return SeeOther("/login?notice=invalid")
     tg_id = verified["id"]
@@ -129,12 +155,14 @@ def telegram_auth(request):
     full_name = f"{first} {last}".strip() or verified.get("username", "")
     handle = verified.get("username", "")
     invite = request.session.pop("pending_invite_code", None)
+    detected_tz = _extract_browser_timezone(request)
     reader = get_or_create_telegram_reader(
         None,
         tg_id,
         full_name or None,
         handle=handle or None,
         invite_code=invite,
+        timezone=detected_tz,
     )
     if _is_reader_blocked_or_inactive(reader):
         return SeeOther("/login?notice=blocked")
@@ -182,8 +210,13 @@ def magic_auth(request):
         if is_access_allowed(ext_id or None, pending_invite) and (
             awaiting_invite or explicitly_invited_or_allowlisted
         ):
+            detected_tz = _extract_browser_timezone(request)
+            update_fields = ["is_allowed"]
             reader.is_allowed = True
-            reader.save(update_fields=["is_allowed"])
+            if detected_tz and reader.timezone == DEFAULT_TIMEZONE:
+                reader.timezone = detected_tz
+                update_fields.append("timezone")
+            reader.save(update_fields=update_fields)
             if ident and awaiting_invite:
                 meta = dict(ident.metadata or {})
                 meta.pop("awaiting_invite", None)
@@ -236,6 +269,7 @@ def today(request):
             "books": books,
             "notes": notes,
             "chapter_lang": _chapter_lang(plan),
+            "max_reflection_chars": max_reflection_chars(),
         },
     )
 
@@ -336,6 +370,8 @@ def read_chapter(request, slug: str, position: int):
             "nxt": nxt if nxt and position + 1 <= state.unlocked_through else None,
             "prev": prev,
             "notes": notes,
+            "notice": request.GET.get("notice"),
+            "max_reflection_chars": max_reflection_chars(),
         },
     )
 
@@ -346,11 +382,14 @@ def add_note(request, slug: str, position: int):
     if redirect_resp:
         return redirect_resp
     body = request.POST.get("body", "")
+    cleaned = body.strip()
+    if len(cleaned) > max_reflection_chars():
+        return SeeOther(f"/read/{slug}/{position}?notice=note_too_long")
     book = get_book(None, slug)
-    if book:
+    if book and cleaned:
         plan_row = get_plan(None, reader["id"], book["id"])
-        if plan_row and body.strip():
-            add_reflection(None, plan_row["id"], position, body, source_channel="web")
+        if plan_row:
+            add_reflection(None, plan_row["id"], position, cleaned, source_channel="web")
     return SeeOther(f"/read/{slug}/{position}")
 
 
@@ -464,14 +503,22 @@ def _load_settings_context(request):
     reader, redirect_resp = _require_reader_or_redirect(request)
     if redirect_resp:
         return None, redirect_resp
-    token = bot_token()
-    can_manage_bot = bool(_is_operator_reader(reader) or settings.DEBUG)
+    can_manage_bot = _is_operator_reader(reader)
+    token = bot_token() if can_manage_bot else ""
+    tg_ident = get_telegram_identity(reader["id"])
     return (
         {
             "reader": reader,
             "token_masked": _mask(token) if can_manage_bot else "",
             "has_token": bool(token),
             "can_edit_token": can_manage_bot,
+            "has_telegram_channel": tg_ident is not None,
+            "telegram_delivery_enabled": bool(tg_ident.is_delivery_enabled) if tg_ident else True,
+            "telegram_handle": tg_ident.handle if tg_ident else "",
+            "delivery_disabled_reason": (
+                (tg_ident.metadata or {}).get("delivery_disabled_reason") if tg_ident else None
+            ),
+            "iana_timezones": list_iana_timezones(),
             "notice": request.GET.get("notice"),
         },
         None,
@@ -479,17 +526,40 @@ def _load_settings_context(request):
 
 
 @sync_to_async
-def _apply_settings_update(request, timezone: str, delivery_hhmm: str, token: str):
+def _apply_settings_update(
+    request,
+    timezone: str,
+    delivery_hhmm: str,
+    token: str,
+    delivery_enabled: bool | None,
+):
     reader, redirect_resp = _require_reader_or_redirect(request)
     if redirect_resp:
         return None, redirect_resp, False
+
+    tz_clean = timezone.strip()
+    if not tz_clean or not is_valid_timezone(tz_clean):
+        return None, SeeOther("/settings?notice=bad_timezone"), False
+
+    hhmm_clean = normalize_hhmm(delivery_hhmm.strip())
+    if not hhmm_clean:
+        return None, SeeOther("/settings?notice=bad_time"), False
+
     update_reader(
         None,
         reader["id"],
-        timezone=timezone.strip(),
-        delivery_hhmm=delivery_hhmm.strip(),
+        timezone=tz_clean,
+        delivery_hhmm=hhmm_clean,
+        strict=True,
     )
-    can_set_token = bool(_is_operator_reader(reader) or settings.DEBUG)
+    if delivery_enabled is not None:
+        set_telegram_delivery_enabled(
+            reader["id"],
+            enabled=delivery_enabled,
+            reason=None if delivery_enabled else "user_settings",
+        )
+
+    can_set_token = _is_operator_reader(reader)
     if token and can_set_token:
         set_bot_token(None, token)
     return reader, None, (bool(token) and can_set_token)
@@ -510,8 +580,20 @@ async def _save_settings(request):
     timezone = request.POST.get("timezone", "")
     delivery_hhmm = request.POST.get("delivery_hhmm", "")
     token = request.POST.get("telegram_bot_token", "").strip()
+    raw_toggle = request.POST.get("telegram_delivery_enabled")
+    if raw_toggle is not None:
+        delivery_enabled: bool | None = raw_toggle.strip().lower() in {"1", "on", "true", "yes"}
+    elif "telegram_delivery_field" in request.POST:
+        delivery_enabled = False
+    else:
+        delivery_enabled = None
+
     _, redirect_resp, should_start_bot = await _apply_settings_update(
-        request, timezone, delivery_hhmm, token
+        request,
+        timezone,
+        delivery_hhmm,
+        token,
+        delivery_enabled,
     )
     if redirect_resp:
         return redirect_resp
