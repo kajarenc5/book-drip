@@ -1,7 +1,7 @@
 # ADR 0007: Reprocess-safe chapter keys and extensible schema for text and audio reflections
 
-- Status: Proposed
-- Date: 2026-11-09
+- Status: Accepted (implemented via `Chapter.chapter_key`, `Reflection` UUID model, web & Telegram text reflections; audio recording/playback reserved for a future iteration)
+- Date: 2026-11-09 (accepted 2026-11-11, updated 2026-11-23)
 
 ## Context
 

@@ -158,14 +158,14 @@ def test_epub_zip_bombs_traversal_nested_encrypted_and_corrupt_rejected(data_dir
     _assert_zero_user_books_and_artifacts(initial_ids)
 
     # 2. Per-entry uncompressed byte cap
-    monkeypatch.setattr(extract_mod, "MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES", 8 * 1024)
-    incompressible = bytes((i * 73 + 19) % 251 for i in range(12 * 1024))
-    p_entry_cap = tmp_path / "entry_cap.epub"
-    p_entry_cap.write_bytes(_valid_epub_bytes(extra_entries={"OEBPS/big.bin": incompressible}))
-    with pytest.raises(UploadValidationError) as exc_entry:
-        ingest_file(p_entry_cap)
-    assert exc_entry.value.code == "unsafe"
-    monkeypatch.undo()
+    with monkeypatch.context() as m:
+        m.setattr(extract_mod, "MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES", 8 * 1024)
+        incompressible = bytes((i * 73 + 19) % 251 for i in range(12 * 1024))
+        p_entry_cap = tmp_path / "entry_cap.epub"
+        p_entry_cap.write_bytes(_valid_epub_bytes(extra_entries={"OEBPS/big.bin": incompressible}))
+        with pytest.raises(UploadValidationError) as exc_entry:
+            ingest_file(p_entry_cap)
+        assert exc_entry.value.code == "unsafe"
     _assert_zero_user_books_and_artifacts(initial_ids)
 
     # 3. Total uncompressed byte cap across multiple entries

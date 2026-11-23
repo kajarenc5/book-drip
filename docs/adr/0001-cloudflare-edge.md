@@ -1,7 +1,7 @@
 # ADR 0001: Cloudflare is the edge, name.am stays the registrar
 
-- Status: Proposed
-- Date: 2026-11-09
+- Status: Accepted (implemented via `infra/docker/Caddyfile`, `infra/aws/install-origin-cert.sh`, `site/wrangler.jsonc`, and WhiteNoise in `settings.py`)
+- Date: 2026-11-09 (accepted 2026-11-11, updated 2026-11-23)
 
 ## Context
 

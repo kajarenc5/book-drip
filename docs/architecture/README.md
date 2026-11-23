@@ -1,8 +1,8 @@
-# Proposed Architecture
+# Architecture
 
-Status: **Proposed**. This document describes the target deployment, data model, identity architecture, and operational flows for One Chapter (`onechapter.am` and `@one_chapter_bot`). Individual decisions are recorded in [../adr/README.md](../adr/README.md).
+Status: **Implemented (Accepted)**. This document describes the deployment, data model, identity architecture, and operational flows for One Chapter (`onechapter.am`, `app.onechapter.am`, and `@one_chapter_bot`). Individual decisions are recorded in [../adr/README.md](../adr/README.md) (ADR 0001–0011).
 
-One Chapter runs as a cohesive Docker Compose stack on a single Graviton EC2 instance in `eu-north-1`, behind Cloudflare at the edge, using **Django 5.2 ORM** with **PostgreSQL 17** on the host and a single private **S3 Standard** bucket in `eu-north-1` for durable storage (book originals, automated PostgreSQL backups, and future audio reflections).
+One Chapter runs as a cohesive Docker Compose stack on a single Graviton EC2 instance (`t4g.small`) in `eu-north-1`, behind Cloudflare at the edge (with the public landing page deployed via Cloudflare Workers static assets in `site/`), using **Django 5.2 ORM** with **PostgreSQL 17** on the host and a single private **S3 Standard** bucket in `eu-north-1` for durable storage (book originals, automated PostgreSQL backups, and future audio reflections).
 
 ---
 
@@ -94,6 +94,8 @@ erDiagram
     string timezone "default Asia/Yerevan"
     string delivery_hhmm "default 08:00"
     boolean is_allowed "Invite-only gate"
+    boolean is_blocked "Explicit block (overrides public mode)"
+    boolean is_operator "Staff/admin role (fail-closed)"
     datetime created_at
   }
 
@@ -114,7 +116,7 @@ erDiagram
     string title
     string author
     string language
-    string profile "tarasov | prince | generic | seed"
+    string profile "tarasov | gosudar | prince | generic | seed"
     string source_filename
     string source_sha256 UK "nullable for seeds"
     string s3_key "originals/{sha256}/{filename}"
@@ -222,17 +224,18 @@ sequenceDiagram
   participant S3 as S3 Bucket (originals/)
   participant DB as PostgreSQL 17
 
-  Reader->>App: Upload book file (.mobi / .epub / .fb2)
-  App->>App: Compute sha256(bytes)
+  Reader->>App: Upload book file (.mobi / .epub / .fb2 / .html / .txt)
+  App->>App: Check rate limit & size ceiling (25 MiB web / 20 MiB Telegram)
+  App->>App: Validate archive/XML safety & compute sha256(bytes)
   App->>DB: Check Book by source_sha256
   alt Book with sha256 already exists
     DB-->>App: Existing Book
     App-->>Reader: Open/Start existing Book (no overwrite)
-  else New file
-    App->>App: Extract & split in worker thread (asyncio.to_thread)
-    App->>S3: PutObject originals/{sha256}/{filename}
-    App->>DB: INSERT Book (s3_key, source_sha256, uploaded_by) + Chapters (chapter_key)
-    App->>App: Delete temp file
+  else New file (atomic parse-before-save)
+    App->>App: Extract & split in worker thread (asyncio.to_thread); validate non-empty chapters
+    App->>DB: Begin transaction: INSERT Book + Chapters (chapter_key)
+    App->>S3: PutObject originals/{sha256}/{filename} (rolled back if DB fails)
+    App->>App: Delete temp file in finally
     App-->>Reader: Book ready in shared library
   end
 ```

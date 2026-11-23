@@ -1,7 +1,7 @@
 # ADR 0004: PostgreSQL 17 in Docker with S3 backups and Django 5.2 ORM from Day 1
 
-- Status: Proposed
-- Date: 2026-11-09
+- Status: Accepted (implemented via Django 5.2 models/migrations, `src/onechapter/local_pg.py`, `infra/scripts/db-backup.sh`, and PostgreSQL 17 CI)
+- Date: 2026-11-09 (accepted 2026-11-11, updated 2026-11-23)
 
 ## Context
 

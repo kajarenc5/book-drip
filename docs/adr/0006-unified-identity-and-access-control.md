@@ -1,7 +1,7 @@
 # ADR 0006: Unified multi-channel reader identity and shared library access control
 
-- Status: Proposed
-- Date: 2026-11-09
+- Status: Accepted (implemented via `Reader`/`ChannelIdentity`, Telegram login & magic links; extended by [ADR 0008](0008-operator-privilege-isolation-and-account-blocking.md))
+- Date: 2026-11-09 (accepted 2026-11-11, updated 2026-11-23)
 
 ## Context
 

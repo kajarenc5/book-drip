@@ -1,7 +1,7 @@
 # ADR 0003: One Graviton EC2 server running Docker Compose for app, bot, and PostgreSQL
 
-- Status: Proposed
-- Date: 2026-11-09
+- Status: Accepted (implemented via `infra/aws/template.yaml`, `infra/aws/deploy.sh`, `infra/aws/release.sh`, and `docker-compose.prod.yml`)
+- Date: 2026-11-09 (accepted 2026-11-11, updated 2026-11-23)
 
 ## Context
 

@@ -1,7 +1,7 @@
 # ADR 0002: Public landing page and staged access for the reader
 
-- Status: Proposed
-- Date: 2026-11-09
+- Status: Accepted (implemented via Cloudflare Workers static assets in `site/` and Django auth/settings isolation)
+- Date: 2026-11-09 (accepted 2026-11-11, updated 2026-11-23)
 
 ## Context
 

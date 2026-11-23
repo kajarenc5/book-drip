@@ -1,7 +1,7 @@
 # ADR 0005: S3 storage layout, immutable book uploads, and safe reprocessing
 
-- Status: Proposed
-- Date: 2026-11-09
+- Status: Accepted (implemented via `src/onechapter/storage.py` and `src/onechapter/library.py`; extended by [ADR 0009](0009-upload-security-hardening-and-atomic-parse-before-save.md))
+- Date: 2026-11-09 (accepted 2026-11-11, updated 2026-11-23)
 
 ## Context
 
