@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from onechapter.ingest import gosudar, tarasov
+from onechapter.ingest import art_of_war, gosudar, tarasov
 from onechapter.ingest.extract import (
     MAX_METADATA_CHARS,
     ExtractedBook,
@@ -101,6 +101,15 @@ def split_extracted(book: ExtractedBook) -> SplitResult:
     ):
         result = split_gosudar(book)
         if len(result.chapters) >= 20:
+            return _enforce_max_chapters(result)
+    if art_of_war.looks_like_art_of_war(
+        book.filename,
+        book.text,
+        title=book.title,
+        author=book.author,
+    ):
+        result = split_art_of_war(book)
+        if len(result.chapters) >= 10:
             return _enforce_max_chapters(result)
     return _enforce_max_chapters(split_generic(book))
 
@@ -360,6 +369,125 @@ def split_gosudar(book: ExtractedBook) -> SplitResult:
         skipped=skipped,
         language="ru",
         slug=gosudar.CANONICAL_SLUG,
+    )
+
+
+def _find_art_of_war_back_cutoff(lines: list[str], start_line: int) -> int:
+    cutoff = _find_back_matter_line(lines, start_line, art_of_war.SKIP_AFTER_TITLES)
+    for idx in range(start_line, cutoff):
+        stripped = lines[idx].strip()
+        if not stripped:
+            continue
+        prev_blank = idx == 0 or not lines[idx - 1].strip()
+        if not prev_blank:
+            continue
+        if art_of_war.COMMENTARY_START_RE.match(stripped):
+            return idx
+        m = art_of_war.CHAPTER_HEADING_RE.match(stripped)
+        if m:
+            num = art_of_war.parse_chapter_number(m.group(1))
+            if num == 1 or not art_of_war.is_plausible_inline_subtitle(m.group(2) or ""):
+                return idx
+    return cutoff
+
+
+def split_art_of_war(book: ExtractedBook) -> SplitResult:
+    text = paragraphize(book.text)
+    lines = text.split("\n")
+    skipped: list[str] = []
+
+    raw_candidates: list[tuple[int, int, int, str]] = []
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        m = art_of_war.CHAPTER_HEADING_RE.match(stripped) if stripped else None
+        if not m:
+            idx += 1
+            continue
+        num = art_of_war.parse_chapter_number(m.group(1))
+        if not num:
+            idx += 1
+            continue
+        inline_sub = (m.group(2) or "").strip()
+        if inline_sub:
+            if not art_of_war.is_plausible_inline_subtitle(inline_sub):
+                idx += 1
+                continue
+            subtitle_raw = inline_sub
+            body_start = idx + 1
+        else:
+            subtitle_raw, body_start = _consume_subtitle_lines(lines, idx + 1)
+        raw_candidates.append((idx, body_start, num, subtitle_raw))
+        idx = max(idx + 1, body_start)
+
+    valid_chapters: list[tuple[int, int, int, int, str]] = []
+    for c_i, (head_line, body_start, num, subtitle_raw) in enumerate(raw_candidates):
+        next_head = (
+            raw_candidates[c_i + 1][0]
+            if c_i + 1 < len(raw_candidates)
+            else _find_art_of_war_back_cutoff(lines, body_start)
+        )
+        probe_body = paragraphize("\n".join(lines[body_start:next_head]))
+        if word_count(probe_body) < 25 or _looks_like_toc(probe_body):
+            continue
+        valid_chapters.append((head_line, body_start, next_head, num, subtitle_raw))
+
+    candidates_by_num: dict[int, list[tuple[int, int, int, int, str]]] = {}
+    for entry in valid_chapters:
+        candidates_by_num.setdefault(entry[3], []).append(entry)
+
+    ordered_entries: list[tuple[int, int, int, int, str]] = []
+    cursor_line = -1
+    for num in art_of_war.CHAPTER_NUMBERS:
+        options = [e for e in candidates_by_num.get(num, []) if e[0] > cursor_line]
+        if not options:
+            skipped.append(f"Глава {num}")
+            continue
+        chosen = options[0]
+        ordered_entries.append(chosen)
+        cursor_line = chosen[0]
+
+    chapters: list[ChapterDraft] = []
+    if ordered_entries:
+        last_body_start = ordered_entries[-1][1]
+        back_cutoff = _find_art_of_war_back_cutoff(lines, last_body_start)
+        stripped_notes = back_cutoff < len(lines)
+
+        for e_i, (_head_line, body_start, _probe_end, num, subtitle_raw) in enumerate(
+            ordered_entries
+        ):
+            ch_end = (
+                ordered_entries[e_i + 1][0]
+                if e_i + 1 < len(ordered_entries)
+                else back_cutoff
+            )
+            body = art_of_war.clean_prose_body(
+                "\n".join(lines[body_start:ch_end]),
+                strip_note_refs=stripped_notes,
+            )
+            if word_count(body) < 25:
+                skipped.append(f"Глава {num} (too short)")
+                continue
+            subtitle = art_of_war.clean_subtitle(subtitle_raw)
+            full_title = f"Глава {num}. {subtitle}" if subtitle else f"Глава {num}"
+            chapters.append(
+                ChapterDraft(
+                    index=len(chapters),
+                    title=_clamp(full_title, f"Глава {num}"),
+                    body=body,
+                    part=_clamp_opt(art_of_war.CANONICAL_PART),
+                    source="art_of_war_ru",
+                )
+            )
+
+    return SplitResult(
+        title=_clamp(art_of_war.CANONICAL_TITLE, "Искусство войны"),
+        author=_clamp_opt(art_of_war.CANONICAL_AUTHOR),
+        profile="art_of_war",
+        chapters=chapters,
+        skipped=skipped,
+        language="ru",
+        slug=art_of_war.CANONICAL_SLUG,
     )
 
 

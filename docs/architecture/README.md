@@ -116,7 +116,7 @@ erDiagram
     string title
     string author
     string language
-    string profile "tarasov | gosudar | prince | generic | seed"
+    string profile "tarasov | gosudar | art_of_war | prince | generic | seed"
     string source_filename
     string source_sha256 UK "nullable for seeds"
     string s3_key "originals/{sha256}/{filename}"

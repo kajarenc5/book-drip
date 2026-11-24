@@ -14,6 +14,6 @@ Architecture decisions for deploying and evolving One Chapter at `onechapter.am`
 | [0008](0008-operator-privilege-isolation-and-account-blocking.md) | Accepted | Isolate operator privileges via `ONECHAPTER_OPERATOR_TELEGRAM_IDS` with fail-closed `/admin` access in public mode; add explicit `Reader.is_blocked` blocking and PostgreSQL 17 CI. |
 | [0009](0009-upload-security-hardening-and-atomic-parse-before-save.md) | Accepted | Harden book uploads against archive/ZIP/MOBI/XML bombs, enforce per-reader/IP rate limits and 25 MiB/20 MiB ceilings, and parse/split atomically before saving to S3/DB. |
 | [0010](0010-telegram-delivery-reliability-and-public-onboarding.md) | Accepted | Bulk due-delivery queries, automatic delivery disable on permanent Telegram errors, `RetryAfter` chunk resumption, `/stop` opt-out, browser timezone detection, reflection cap, and security headers. |
-| [0011](0011-book-splitter-profiles-and-multilingual-extraction.md) | Accepted | Dedicated book splitter profiles (`tarasov`, `gosudar`, `generic`), paragraph-preserving HTML/FB2 extraction, ASCII transliterated slugs, and Cyrillic language detection. |
+| [0011](0011-book-splitter-profiles-and-multilingual-extraction.md) | Accepted | Dedicated book splitter profiles (`tarasov`, `gosudar`, `art_of_war`, `generic`), paragraph-preserving HTML/FB2 extraction, ASCII transliterated slugs, and Cyrillic language detection. |
 
 System diagrams, data model, and flows are in [../architecture/README.md](../architecture/README.md).

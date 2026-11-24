@@ -131,6 +131,6 @@ Constraints for each level:
 - **Reflections, Telegram Reliability & Book Splitters ([ADR 0007](docs/adr/0007-extensible-reflections-and-media.md), [ADR 0010](docs/adr/0010-telegram-delivery-reliability-and-public-onboarding.md), [ADR 0011](docs/adr/0011-book-splitter-profiles-and-multilingual-extraction.md))**:
   - Reprocess-safe `Chapter.chapter_key` + `Reflection` snapshots (web + Telegram plain-text notes, capped at 10,000 chars; audio/transcript fields ready).
   - Daily delivery uses bulk queries (no N+1), auto-disables `ChannelIdentity.is_delivery_enabled` on permanent Telegram `Forbidden`/`BadRequest` errors, handles `RetryAfter` with backoff and partial chunk resumption, keeps `drop_pending_updates=False`, supports `/stop`/`/unsubscribe` and web delivery toggles, and auto-detects browser timezone for new web logins only.
-  - Dedicated splitter profiles: `tarasov` (`tehnologiya-zhizni`, `ru`), `gosudar` (Russian *Государь*, `gosudar`, `ru`, coexisting with seeded English `the-prince`), and `generic`, with paragraph-preserving HTML/FB2 extraction, ASCII transliterated slugs (`slugify_ascii`), and automatic Cyrillic/language detection.
+  - Dedicated splitter profiles: `tarasov` (`tehnologiya-zhizni`, `ru`), `gosudar` (Russian *Государь*, `gosudar`, `ru`, coexisting with seeded English `the-prince`), `art_of_war` (Russian *Искусство войны* by Sun Tzu, `iskusstvo-voyny`, `ru`, 13 chapters), and `generic`, with paragraph-preserving HTML/FB2 extraction, ASCII transliterated slugs (`slugify_ascii`), and automatic Cyrillic/language detection.
 
 

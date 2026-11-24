@@ -1,6 +1,6 @@
 # ADR 0011: Book-specific splitter profiles and multilingual Cyrillic extraction
 
-- Status: Accepted (implemented in PR #1, PR #5, and PR #10: `src/onechapter/ingest/tarasov.py`, `src/onechapter/ingest/gosudar.py`, `src/onechapter/ingest/split.py`, `src/onechapter/ingest/extract.py`, `src/onechapter/ingest/textutil.py`, `src/onechapter/library.py`, `src/onechapter/reader/views.py`, `tests/test_tarasov_split.py`, `tests/test_gosudar_split.py`)
+- Status: Accepted (implemented in PR #1, PR #5, PR #10, and updated 2026-11-24: `src/onechapter/ingest/tarasov.py`, `src/onechapter/ingest/gosudar.py`, `src/onechapter/ingest/art_of_war.py`, `src/onechapter/ingest/split.py`, `src/onechapter/ingest/extract.py`, `src/onechapter/ingest/textutil.py`, `src/onechapter/library.py`, `src/onechapter/reader/views.py`, `tests/test_tarasov_split.py`, `tests/test_gosudar_split.py`, `tests/test_art_of_war_split.py`)
 - Date: 2026-11-18
 
 ## Context
@@ -19,6 +19,7 @@ One Chapter's core value is splitting dense books into true daily units rather t
    - Maintain dedicated book profiles detected automatically from filename, metadata, and body heuristics, falling back to the generic heading/chunk splitter when no profile matches:
      - **`tarasov` (`ingest/tarasov.py`):** Matches publisher essay titles across printings (including first-edition variants without cutting inside prose paragraphs), skips missing edition titles gracefully, drops *Об авторе* / publisher catalogue, and locks the book to canonical slug `tehnologiya-zhizni` (`language="ru"`).
      - **`gosudar` (`ingest/gosudar.py`):** Detects Russian Machiavelli editions (*Государь*), isolates strictly the Dedication (`Посвящение Лоренцо деи Медичи`) and Chapters I–XXVI (accepting Roman or Arabic numerals), normalizes ALL-CAPS Russian subtitles while restoring proper nouns, strips editorial prefaces, ornament lines, and endnote reference markers (`[1]`, `*[2]`), drops back matter (`Примечания`, `Комментарии`, etc.), and locks to canonical slug `gosudar` (`language="ru"`) so it coexists cleanly with English `the-prince`.
+     - **`art_of_war` (`ingest/art_of_war.py`):** Detects Russian Sun Tzu editions (*Искусство войны*, e.g., N. I. Konrad's translation), isolates strictly Chapters 1–13 (accepting Arabic or Roman numerals), strips translator prefaces, heading/body footnote markers (`[1]`, `[*]`, `[**]`, `[***]`) while preserving bracketed prose insertions, drops chapter-by-chapter endnote commentaries (`Глава 1[*]...`, `1.1. ...`, `Примечания`, `Комментарии`), and locks to canonical slug `iskusstvo-voyny` (`language="ru"`).
      - **`generic`:** Generic chapter/heading splitter for arbitrary user-uploaded books.
 
 2. **Paragraph-Preserving HTML/FB2 Extraction (`ingest/extract.py`):**
